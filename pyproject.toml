@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maskcode"
+version = "0.7.0"
+description = "A coding terminal with local Ollama privacy detection and a masking gateway"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "LEGAL_REVIEW.md"]
+requires-python = ">=3.10"
+dependencies = ["prompt_toolkit==3.0.52", "wcwidth==0.7.0"]
+
+[project.urls]
+Repository = "https://github.com/HassanEltahirr/maskcode"
+Issues = "https://github.com/HassanEltahirr/maskcode/issues"
+
+[project.scripts]
+maskcode = "privacy_gateway.cli:main"
+veil = "privacy_gateway.cli:main"
+
+[tool.setuptools.package-data]
+privacy_gateway = ["console.html"]
+
+[tool.setuptools.packages.find]
+include = ["privacy_gateway*"]

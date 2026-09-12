@@ -1,0 +1,10 @@
+{
+  "literals": [
+    {"value": "Cedar Example LLC", "label": "ORG", "ignore_case": true, "normalize": true, "encodings": ["url", "base64"]},
+    {"value": "Nadia Example", "label": "PERSON", "ignore_case": true, "normalize": true, "encodings": ["url", "base64"]},
+    {"value": "Project Sandglass", "label": "PROJECT", "ignore_case": true, "normalize": true, "encodings": ["url", "base64"]}
+  ],
+  "patterns": [
+    {"regex": "CASE-[0-9]{8}", "label": "CASE"}
+  ]
+}
