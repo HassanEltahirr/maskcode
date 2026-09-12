@@ -42,6 +42,9 @@ software:
 - [Claude Code](https://code.claude.com/docs/en/quickstart) or
   [Codex CLI](https://learn.chatgpt.com/docs/cli), available on your shell's `PATH`.
   Use your own account with access to the selected provider and model.
+  On macOS, MaskCode also finds the Codex executable bundled with `Codex.app` or
+  `ChatGPT.app` in `/Applications` or `~/Applications`; a CLI on `PATH` takes
+  precedence. Run `maskcode gateway doctor` to see the selected executable.
 - [Ollama for macOS](https://docs.ollama.com/macos) and local
   [qwen2.5:1.5b weights](https://ollama.com/library/qwen2.5:1.5b).
 
@@ -84,6 +87,16 @@ For Codex:
 ```sh
 codex login
 ```
+
+If Codex is available only inside a desktop app, use the executable path reported
+by `maskcode gateway doctor` for sign-in. For example:
+
+```sh
+"/Applications/ChatGPT.app/Contents/Resources/codex" login
+```
+
+MaskCode itself finds that bundled executable automatically; no shell PATH edit
+is needed. Existing official authentication stays in place.
 
 These are the providers' own sign-in flows. MaskCode does not supply an account,
 subscription, or API credits. See [Authentication](#authentication) for recovery

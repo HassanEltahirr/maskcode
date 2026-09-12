@@ -1,4 +1,31 @@
-# MaskCode 0.7.0 validation
+# MaskCode validation
+
+## 0.7.1 — desktop Codex discovery
+
+The launch failure reported from an ordinary terminal came from searching only
+PATH. The development app supplied a PATH entry for its bundled Codex, hiding
+that difference in the earlier check. Version 0.7.1 keeps PATH precedence and
+also checks standard Codex.app and ChatGPT.app locations on macOS. Doctor uses
+the same resolver and reports the selected executable.
+
+- Full suite with installed-client opt-ins and Codex removed from PATH:
+  **355 tests in 34.566 s, 354 passed and one optional local-runtime test skipped.**
+  Installed Codex file/patch/test workflows used synthetic data and local fixture
+  providers, finding the actual app-bundled executable through the fallback.
+- Actual MaskCode launcher reached official Codex help with local Ollama and the
+  normal sandbox active, while no Codex executable was visible on PATH: exit 0.
+  No inference prompt was submitted. Temporary owned resources were cleaned up.
+- Discovery tests cover PATH precedence, app paths containing spaces, missing or
+  nonexecutable files, directories, broken symlinks and non-macOS behavior.
+- An initial probe reordered PATH and selected a different installed Ollama;
+  its local server timed out. The successful probe removed only app PATH entries
+  and preserved the working Ollama selection. Other installed Ollama versions
+  are not validated by this fix.
+
+The earlier live cloud evidence below remains specific to 0.7.0; this patch did
+not send new cloud inference requests or change the masking or transport rules.
+
+## 0.7.0 validation
 
 Validated on this Mac on 2026-09-13: Apple M1, 16 GiB RAM, Python 3.10,
 Claude Code 2.1.247, Codex 0.153.4, Ollama 0.11.10, and the already installed

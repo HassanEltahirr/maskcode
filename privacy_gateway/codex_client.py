@@ -12,6 +12,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import secrets
 import shutil
@@ -33,6 +34,25 @@ _VALUES = frozenset({"--model", "-m", "--ask-for-approval", "-a",
                      "--cd", "-C", "--add-dir", "--color", "--output-schema",
                      "--output-last-message", "-o"})
 _AUTH_ENV = frozenset({"CODEX_HOME", "CODEX_API_KEY", "OPENAI_API_KEY"})
+
+
+def _macos_codex_paths():
+    """Known desktop bundle locations; never search project files for a client."""
+    return tuple(directory / app / "Contents" / "Resources" / "codex"
+                 for app in ("Codex.app", "ChatGPT.app")
+                 for directory in (Path("/Applications"), Path.home() / "Applications"))
+
+
+def find_codex_binary():
+    """Prefer the user's PATH, then the CLI in standard macOS app bundles."""
+    binary = shutil.which("codex")
+    if binary:
+        return os.path.abspath(binary)
+    if platform.system() == "Darwin":
+        for candidate in _macos_codex_paths():
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate.absolute())
+    return None
 
 
 def validate_codex_arguments(arguments):
@@ -225,9 +245,11 @@ def protected_codex_launch(server, arguments, *, cwd=None):
     additional = [(path if path.is_absolute() else effective_cwd / path).resolve(strict=True) for path in additional]
     if not effective_cwd.is_dir() or any(not path.is_dir() for path in additional):
         raise CodexConfigurationError("A Codex workspace directory does not exist")
-    binary = shutil.which("codex")
+    binary = find_codex_binary()
     if not binary:
-        raise CodexConfigurationError("Codex CLI is not installed")
+        raise CodexConfigurationError(
+            "Codex was not found on PATH or in standard macOS app locations. "
+            "Install the official Codex CLI or desktop app, then retry.")
     with tempfile.TemporaryDirectory(prefix="maskcode-codex-") as temporary:
         directory = Path(temporary)
         model = _read_bundled_model(binary, server.server_port, directory, selected)

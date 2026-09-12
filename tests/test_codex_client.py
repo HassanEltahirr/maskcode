@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import shutil
 import platform
 import threading
 import socket
@@ -17,8 +16,75 @@ from unittest.mock import patch
 
 from privacy_gateway.codex_client import (
     CodexConfigurationError, codex_environment, protected_codex_launch,
-    validate_codex_arguments,
+    validate_codex_arguments, find_codex_binary,
 )
+
+
+class CodexDiscoveryTests(unittest.TestCase):
+    def test_path_installation_takes_precedence_without_scanning_apps(self):
+        with tempfile.TemporaryDirectory(prefix="maskcode-codex-discovery-") as temporary:
+            binary = Path(temporary, "preferred-cli").resolve()
+            binary.write_text("synthetic executable fixture")
+            binary.chmod(0o700)
+            with patch("privacy_gateway.codex_client.shutil.which", return_value=str(binary)) as lookup, \
+                    patch("privacy_gateway.codex_client._macos_codex_paths") as candidates:
+                self.assertEqual(find_codex_binary(), str(binary))
+            lookup.assert_called_once_with("codex")
+            candidates.assert_not_called()
+
+    def test_executable_app_bundle_fallback_preserves_spaces_in_path(self):
+        with tempfile.TemporaryDirectory(prefix="maskcode codex discovery ") as temporary:
+            binary = Path(temporary, "Applications", "Codex.app", "Contents", "Resources", "codex")
+            binary.parent.mkdir(parents=True)
+            binary.write_text("synthetic executable fixture")
+            binary.chmod(0o700)
+            with patch("privacy_gateway.codex_client.shutil.which", return_value=None), \
+                    patch("platform.system", return_value="Darwin"), \
+                    patch("privacy_gateway.codex_client._macos_codex_paths", return_value=(binary,)):
+                discovered = find_codex_binary()
+            self.assertEqual(Path(discovered).resolve(), binary.resolve())
+            self.assertTrue(Path(discovered).is_absolute())
+            self.assertIn(" ", discovered)
+
+    def test_fallback_skips_missing_directories_nonexecutables_and_broken_links(self):
+        with tempfile.TemporaryDirectory(prefix="maskcode-codex-discovery-") as temporary:
+            root = Path(temporary)
+            missing = root / "missing"
+            directory = root / "directory"
+            directory.mkdir()
+            nonexecutable = root / "nonexecutable"
+            nonexecutable.write_text("synthetic nonexecutable fixture")
+            nonexecutable.chmod(0o600)
+            broken = root / "broken-link"
+            broken.symlink_to(missing)
+            valid = root / "valid"
+            valid.write_text("synthetic executable fixture")
+            valid.chmod(0o700)
+            invalid = (missing, directory, nonexecutable, broken)
+            with patch("privacy_gateway.codex_client.shutil.which", return_value=None), \
+                    patch("platform.system", return_value="Darwin"):
+                for candidate in invalid:
+                    with self.subTest(candidate=candidate.name), \
+                            patch("privacy_gateway.codex_client._macos_codex_paths",
+                                  return_value=(candidate, valid)):
+                        self.assertEqual(Path(find_codex_binary()).resolve(), valid.resolve())
+                with patch("privacy_gateway.codex_client._macos_codex_paths", return_value=invalid):
+                    self.assertIsNone(find_codex_binary())
+
+    def test_nothing_installed_returns_none(self):
+        with patch("privacy_gateway.codex_client.shutil.which", return_value=None), \
+                patch("platform.system", return_value="Darwin"), \
+                patch("privacy_gateway.codex_client._macos_codex_paths", return_value=()):
+            self.assertIsNone(find_codex_binary())
+
+    def test_other_platforms_do_not_scan_macos_bundles(self):
+        for operating_system in ("Linux", "Windows"):
+            with self.subTest(platform=operating_system), \
+                    patch("privacy_gateway.codex_client.shutil.which", return_value=None), \
+                    patch("platform.system", return_value=operating_system), \
+                    patch("privacy_gateway.codex_client._macos_codex_paths") as candidates:
+                self.assertIsNone(find_codex_binary())
+                candidates.assert_not_called()
 
 
 class CodexLaunchTests(unittest.TestCase):
@@ -140,7 +206,7 @@ class CodexLaunchTests(unittest.TestCase):
                 self.fail("Launch should fail")
 
     def test_missing_cli_and_timeout_fail_closed(self):
-        with patch("privacy_gateway.codex_client.shutil.which", return_value=None), self.assertRaises(CodexConfigurationError):
+        with patch("privacy_gateway.codex_client.find_codex_binary", return_value=None), self.assertRaises(CodexConfigurationError):
             with protected_codex_launch(self.server, []):
                 self.fail("Launch should fail")
         with patch("privacy_gateway.codex_client.shutil.which", return_value="/installed/codex"), \
@@ -198,7 +264,7 @@ print(json.dumps(r))
 
 
 @unittest.skipUnless(os.environ.get("MASKCODE_TEST_INSTALLED_CODEX") == "1"
-                     and platform.system() == "Darwin" and shutil.which("codex"),
+                     and platform.system() == "Darwin" and find_codex_binary(),
                      "Opt-in installed Codex integration; dummy auth and local fake transport only")
 class InstalledCodexGatewayTests(unittest.TestCase):
     def test_standard_responses_round_trip_masks_outgoing_and_restores_reply(self):

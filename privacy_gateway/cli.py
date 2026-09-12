@@ -126,9 +126,11 @@ def gateway_main(argv):
                 print(r.redact_text(content), end="" if content.endswith("\n") else "\n")
             return 0
         if args.action == "doctor":
+            from .codex_client import find_codex_binary
             print("Python: " + sys.version.split()[0])
             for name in ("claude", "codex"):
-                print(name + ": " + ("installed" if shutil.which(name) else "not installed"))
+                binary = find_codex_binary() if name == "codex" else shutil.which(name)
+                print(name + ": " + ("installed (" + binary + ")" if binary else "not found"))
             server = GatewayServer(GatewayState())
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
