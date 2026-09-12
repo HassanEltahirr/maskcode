@@ -331,7 +331,7 @@ class TerminalApp:
         if scan.get("enabled"):
             mode = "AI + " + mode
             if scan.get("status") == "scanning":
-                status = "Checking sensitive data locally · " + str(scan.get("scanned_chunks", 0)) + " chunks checked"
+                status = "Checking sensitive data locally · " + str(scan.get("completed_chunks", 0)) + "/" + str(scan.get("current_chunks", 0)) + " chunks checked"
             elif scan.get("status") == "blocked":
                 status = "Local privacy scan blocked · /privacy"
         if not self.busy and self._snapshot.get("last_upstream_status") == 429:

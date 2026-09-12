@@ -1,5 +1,48 @@
 # MaskCode validation
 
+## 0.7.2 — local scan latency
+
+Local-only probes on the same M1 Mac identified cold Qwen loading as the main
+first-request delay. A fresh short-text scan took 47.909 s: Ollama reported
+46.729 s loading, 0.890 s processing 331 prompt tokens (including the detector's
+system prompt), and 0.190 s generating its result. An identical cached scan took
+under 0.001 s; a separate warm short-text scan took 0.548 s. These are small
+synthetic measurements, not end-to-end cloud latency promises.
+
+Two owned-process diagnostic probes reported full Metal GPU offload, no CPU
+fallback, and no permission or pipeline failures. In one, model weights were
+ready by 1.045 s; Metal library setup took 4.778 s and construction of 422 kernel
+pipelines took 19.471 s. Full local scan time was 26.344 s. These stages match
+the [Ollama 0.11.10 Metal backend](https://github.com/ollama/ollama/blob/v0.11.10/ml/backend/ggml/ggml/src/ggml-metal/ggml-metal.m).
+Diagnostic output stayed local to the disposable probes and was discarded.
+No cloud requests or changes to other Ollama processes were made.
+
+The patch keeps the owned model resident until the MaskCode session exits,
+using Ollama's documented [negative keep_alive setting](https://docs.ollama.com/faq#how-do-i-keep-a-model-loaded-in-memory-or-make-it-unload-immediately).
+It prevents an idle timeout from causing another cold load in the same session.
+The first load in a new session remains expensive and retains model memory while
+the session is open; shutdown still terminates the owned process.
+
+The Codex adapter now omits only the exact registered public base instructions
+from local AI extraction. The installed catalog supplies 21,261 characters;
+both real installed-client authentication fixtures verify this exact match while
+still scanning other request content. Deterministic masking always runs, and
+modified instructions, wrong models, nested copies, later-discovered entities,
+and explicit policy matches are covered by boundary regressions. Standalone
+gateways have no exemption; registration is internal, bounded and launch-only.
+
+Scan snapshots now include safe numeric duration and current-request progress.
+The Claude interface shows completed/total chunks. Native Codex prints an initial
+explanation and a numeric summary after exit; no output is injected over its
+active terminal. Native reasoning-effort and service-tier choices are preserved.
+Codex responses remain buffered before release for validation.
+
+**373 tests ran in 35.143 s: 372 passed and one optional local-runtime test was
+skipped.** Both installed-client opt-ins were enabled; actual local runtime
+measurements are reported above. No new live cloud inference was used for this
+patch. The separate exact-input cache remains session-local; this patch does not
+claim to remove all repeated scanning when request structure changes.
+
 ## 0.7.1 — desktop Codex discovery
 
 The launch failure reported from an ordinary terminal came from searching only

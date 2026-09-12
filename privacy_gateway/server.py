@@ -5,6 +5,7 @@ import hmac
 import http.client
 import json
 import math
+import re
 import secrets
 import socket
 import threading
@@ -96,6 +97,25 @@ class GatewayState:
         self.semantic_scanner = semantic_scanner
         self.local_runtime = local_runtime
         self._scan_lock = threading.Lock()
+        self._scan_started = False
+        self._codex_public_instructions = None
+        self.public_instruction_chars_skipped = 0
+
+    def register_codex_instructions(self, model, text):
+        """Register exact public base text from the launcher's bundled catalog.
+
+        No HTTP route or request value can invoke this. Never register a
+        normalized or already-redacted copy. Only semantic discovery may skip
+        the exact model/text pair; all deterministic checks still run.
+        """
+        if (not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", model)
+                or not isinstance(text, str) or not text or len(text) > 262144 or "\0" in text):
+            raise ValueError("Invalid public Codex instruction registration")
+        with self._scan_lock, self.lock:
+            if (self.provider != "codex" or self.closed or self._scan_started or self.forwarded
+                    or self._codex_public_instructions is not None):
+                raise ValueError("Public Codex instructions must be registered once before requests")
+            self._codex_public_instructions = (model, text)
 
     @property
     def protocol_provider(self):
@@ -113,6 +133,7 @@ class GatewayState:
                     "local_model": getattr(self.local_runtime, "model", None),
                     "local_isolation": getattr(self.local_runtime, "isolation_scope", None),
                     "last_upstream_status": self.last_upstream_status,
+                    "public_instruction_chars_skipped": self.public_instruction_chars_skipped,
                     "pending": [{"id": p.id, "preview": p.preview, "headers": p.headers, "redactions": p.redactions,
                                  "created": p.created, "status": p.status}
                                 for p in self.pending.values() if p.status == "pending"]}
@@ -120,13 +141,25 @@ class GatewayState:
     def sanitize(self, payload, trusted, headers=None):
         """Rules first, local entity discovery, then exact replacement and checks."""
         with self._scan_lock:
+            self._scan_started = True
             if self.closed:
                 raise PrivacyBlocked("Gateway session is closed")
             clean = sanitize_payload(payload, self.redactor, self.protocol_provider, trusted)
             if self.semantic_scanner is not None:
                 from .semantic import SemanticScanError
                 try:
-                    fragments = readable_fragments(clean)
+                    inspection = clean
+                    public = self._codex_public_instructions
+                    if (self.provider == "codex" and public is not None
+                            and clean.get("model") == public[0] and clean.get("instructions") == public[1]):
+                        # Only this whole top-level field can match the exact
+                        # installed public catalog. Prompts, nested copies,
+                        # tool definitions/results and edited instructions are
+                        # still scanned. Never change the outgoing payload.
+                        inspection = {key: value for key, value in clean.items() if key != "instructions"}
+                        with self.lock:
+                            self.public_instruction_chars_skipped += len(public[1])
+                    fragments = readable_fragments(inspection)
                     # Authentication and gateway-generated framing never enter
                     # the detector as anonymous user data. Client protocol
                     # headers still receive discovery and all fixed headers

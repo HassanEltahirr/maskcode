@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from privacy_gateway.protocol import readable_fragments, sanitize_payload, PrivacyBlocked
-from privacy_gateway.redaction import Redactor, SensitiveValueError
+from privacy_gateway.redaction import Policy, Redactor, SensitiveValueError
 from privacy_gateway.semantic import SemanticScanner
 from privacy_gateway.server import GatewayServer, GatewayState
 
@@ -208,6 +208,176 @@ class SemanticGatewayTests(unittest.TestCase):
         self.state.redactor.protect_literals([("instructions", "SECRET")])
         with self.assertRaises(PrivacyBlocked):
             self.state.sanitize({"model": "test-model", "instructions": "Hello", "input": "Hi"}, set())
+
+
+class CodexPublicInstructionsTests(unittest.TestCase):
+    MODEL = "gpt-6-astra"
+    PUBLIC_TEXT = "You are a synthetic coding assistant. Read the project and explain your changes."
+
+    def make_state(self, provider="codex", policy=None):
+        runtime = FakeLocalModel()
+        scanner = SemanticScanner(runtime)
+        state = GatewayState(provider=provider, mode="auto", policy=policy,
+                             semantic_scanner=scanner, local_runtime=runtime)
+        self.addCleanup(state.close)
+        return state, scanner, runtime
+
+    def payload(self, instructions=None, model=None):
+        return {"model": model or self.MODEL,
+                "instructions": self.PUBLIC_TEXT if instructions is None else instructions,
+                "input": "Please inspect the synthetic workspace."}
+
+    def test_exact_registered_top_level_instructions_skip_only_ai_and_preserve_payload(self):
+        state, scanner, _ = self.make_state()
+        state.register_codex_instructions(self.MODEL, self.PUBLIC_TEXT)
+        original = self.payload()
+        before = json.dumps(original, sort_keys=True)
+        with patch.object(scanner, "scan", wraps=scanner.scan) as scan:
+            first = state.sanitize(original, set())
+            second = state.sanitize(original, set())
+        self.assertEqual(first, original)
+        self.assertEqual(second, original)
+        self.assertEqual(json.dumps(original, sort_keys=True), before)
+        for call in scan.call_args_list:
+            self.assertNotIn(self.PUBLIC_TEXT, call.args[0])
+            self.assertIn(original["input"], call.args[0])
+        status = state.snapshot()
+        self.assertEqual(status["public_instruction_chars_skipped"], 2 * len(self.PUBLIC_TEXT))
+        self.assertNotIn(self.PUBLIC_TEXT, json.dumps(status))
+
+    def test_modified_whitespace_appended_and_prepended_instructions_are_scanned(self):
+        variants = [self.PUBLIC_TEXT.replace("Read", "read"), " " + self.PUBLIC_TEXT,
+                    self.PUBLIC_TEXT + "\n", self.PUBLIC_TEXT + "\nMira Zorvan",
+                    "Mira Zorvan\n" + self.PUBLIC_TEXT]
+        for changed in variants:
+            with self.subTest(instructions=changed):
+                state, scanner, _ = self.make_state()
+                state.register_codex_instructions(self.MODEL, self.PUBLIC_TEXT)
+                with patch.object(scanner, "scan", wraps=scanner.scan) as scan:
+                    clean = state.sanitize(self.payload(changed), set())
+                self.assertIn(changed, scan.call_args.args[0])
+                self.assertEqual(state.snapshot()["public_instruction_chars_skipped"], 0)
+                if "Mira Zorvan" in changed:
+                    self.assertNotIn("Mira Zorvan", clean["instructions"])
+                    self.assertEqual(state.redactor.restore_text(clean["instructions"]), changed)
+
+    def test_registered_instructions_for_another_model_are_scanned(self):
+        state, scanner, _ = self.make_state()
+        state.register_codex_instructions(self.MODEL, self.PUBLIC_TEXT)
+        with patch.object(scanner, "scan", wraps=scanner.scan) as scan:
+            clean = state.sanitize(self.payload(model="other-synthetic-model"), set())
+        self.assertIn(self.PUBLIC_TEXT, scan.call_args.args[0])
+        self.assertEqual(clean["instructions"], self.PUBLIC_TEXT)
+        self.assertEqual(state.snapshot()["public_instruction_chars_skipped"], 0)
+
+    def test_identical_nested_input_and_tool_text_remain_in_the_scan(self):
+        state, scanner, _ = self.make_state()
+        state.register_codex_instructions(self.MODEL, self.PUBLIC_TEXT)
+        body = self.payload()
+        body["input"] = [{"role": "user", "content": [{"type": "input_text", "text": self.PUBLIC_TEXT}]}]
+        body["extra_context"] = {"instructions": self.PUBLIC_TEXT}
+        body["tools"] = [{"type": "function", "name": "synthetic_local_tool",
+                          "description": self.PUBLIC_TEXT, "parameters": {"type": "object"}}]
+        with patch.object(scanner, "scan", wraps=scanner.scan) as scan:
+            clean = state.sanitize(body, set())
+        self.assertEqual(scan.call_args.args[0].count(self.PUBLIC_TEXT), 3)
+        self.assertEqual(clean, body)
+        self.assertEqual(state.snapshot()["public_instruction_chars_skipped"], len(self.PUBLIC_TEXT))
+
+    def test_explicit_policy_changes_public_text_before_matching_and_scanning(self):
+        policy = Policy.from_dict({"literals": [{"value": "synthetic coding assistant", "label": "PROJECT"}]})
+        state, scanner, _ = self.make_state(policy=policy)
+        state.register_codex_instructions(self.MODEL, self.PUBLIC_TEXT)
+        with patch.object(scanner, "scan", wraps=scanner.scan) as scan:
+            clean = state.sanitize(self.payload(), set())
+        self.assertNotIn("synthetic coding assistant", clean["instructions"])
+        self.assertIn(clean["instructions"], scan.call_args.args[0])
+        self.assertNotIn(self.PUBLIC_TEXT, scan.call_args.args[0])
+        self.assertEqual(state.redactor.restore_text(clean["instructions"]), self.PUBLIC_TEXT)
+        self.assertEqual(state.snapshot()["public_instruction_chars_skipped"], 0)
+
+    def test_entity_discovered_in_user_input_also_masks_exempt_public_text(self):
+        public = self.PUBLIC_TEXT + " Synthetic example: Mira Zorvan."
+        state, scanner, _ = self.make_state()
+        state.register_codex_instructions(self.MODEL, public)
+        body = self.payload(public)
+        body["input"] = "Please help Mira Zorvan with this synthetic example."
+        with patch.object(scanner, "scan", wraps=scanner.scan) as scan:
+            clean = state.sanitize(body, set())
+        self.assertNotIn(public, scan.call_args.args[0])
+        self.assertIn(body["input"], scan.call_args.args[0])
+        for field in ("input", "instructions"):
+            self.assertNotIn("Mira Zorvan", clean[field])
+            self.assertEqual(state.redactor.restore_text(clean[field]), body[field])
+        self.assertEqual(state.snapshot()["public_instruction_chars_skipped"], len(public))
+
+    def test_exemption_does_not_bypass_protocol_or_explicit_structural_checks(self):
+        state, scanner, _ = self.make_state()
+        state.register_codex_instructions(self.MODEL, self.PUBLIC_TEXT)
+        body = self.payload()
+        body["tools"] = [{"type": "web_search"}]
+        with patch.object(scanner, "scan", wraps=scanner.scan) as scan:
+            with self.assertRaises(PrivacyBlocked):
+                state.sanitize(body, set())
+            scan.assert_not_called()
+        state.redactor.protect_literals([("instructions", "SECRET")])
+        with patch.object(scanner, "scan", wraps=scanner.scan) as scan:
+            with self.assertRaises(PrivacyBlocked):
+                state.sanitize(self.payload(), set())
+            scan.assert_not_called()
+
+    def test_unregistered_codex_and_other_providers_still_scan_instructions(self):
+        for provider in ("codex", "openai", "anthropic"):
+            with self.subTest(provider=provider):
+                state, scanner, _ = self.make_state(provider)
+                with patch.object(scanner, "scan", wraps=scanner.scan) as scan:
+                    clean = state.sanitize(self.payload(), set())
+                self.assertIn(self.PUBLIC_TEXT, scan.call_args.args[0])
+                self.assertEqual(clean["instructions"], self.PUBLIC_TEXT)
+                self.assertEqual(state.snapshot()["public_instruction_chars_skipped"], 0)
+
+    def test_registration_rejects_invalid_provider_model_or_text(self):
+        for provider in ("openai", "anthropic"):
+            with self.subTest(provider=provider):
+                state, _, _ = self.make_state(provider)
+                with self.assertRaises(ValueError):
+                    state.register_codex_instructions(self.MODEL, self.PUBLIC_TEXT)
+        invalid = [(None, self.PUBLIC_TEXT), ("", self.PUBLIC_TEXT), ([], self.PUBLIC_TEXT),
+                   ("model with spaces", self.PUBLIC_TEXT), ("m" * 129, self.PUBLIC_TEXT),
+                   ("model\n", self.PUBLIC_TEXT),
+                   (self.MODEL, None), (self.MODEL, ""), (self.MODEL, b"synthetic bytes"),
+                   (self.MODEL, [self.PUBLIC_TEXT]), (self.MODEL, "synthetic\0text"),
+                   (self.MODEL, "x" * 262145)]
+        for index, (model, text) in enumerate(invalid):
+            with self.subTest(case=index):
+                state, _, _ = self.make_state()
+                with self.assertRaises(ValueError):
+                    state.register_codex_instructions(model, text)
+
+    def test_registration_is_once_only_and_closed_after_any_sanitize_attempt(self):
+        state, _, _ = self.make_state()
+        state.register_codex_instructions(self.MODEL, self.PUBLIC_TEXT)
+        for model, text in ((self.MODEL, self.PUBLIC_TEXT), ("other-model", "Other synthetic text")):
+            with self.assertRaises(ValueError):
+                state.register_codex_instructions(model, text)
+        for malformed in (False, True):
+            with self.subTest(malformed=malformed):
+                state, _, _ = self.make_state()
+                body = self.payload()
+                if malformed:
+                    body["tools"] = [{"type": "web_search"}]
+                    with self.assertRaises(PrivacyBlocked):
+                        state.sanitize(body, set())
+                else:
+                    state.sanitize(body, set())
+                # Direct sanitize callers do not increment HTTP request counts.
+                self.assertEqual(state.requests, 0)
+                with self.assertRaises(ValueError):
+                    state.register_codex_instructions(self.MODEL, self.PUBLIC_TEXT)
+        state, _, _ = self.make_state()
+        state.close()
+        with self.assertRaises(ValueError):
+            state.register_codex_instructions(self.MODEL, self.PUBLIC_TEXT)
 
 
 class SemanticBoundaryTests(unittest.TestCase):

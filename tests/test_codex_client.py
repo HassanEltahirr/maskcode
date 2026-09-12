@@ -89,7 +89,9 @@ class CodexDiscoveryTests(unittest.TestCase):
 
 class CodexLaunchTests(unittest.TestCase):
     def setUp(self):
-        self.server = SimpleNamespace(server_port=40123, proxy_url="http://127.0.0.1:40123/proxy/synthetic")
+        from privacy_gateway.server import GatewayState
+        self.server = SimpleNamespace(server_port=40123, proxy_url="http://127.0.0.1:40123/proxy/synthetic",
+                                      state=GatewayState(provider="codex", mode="auto"))
         self.catalog = {"models": [{
             "slug": "gpt-6-astra", "base_instructions": "Official synthetic instructions", "context_window": 272000,
             "model_messages": {"instructions_template": "Official synthetic instructions",
@@ -157,6 +159,8 @@ class CodexLaunchTests(unittest.TestCase):
                 model = json.loads(path.read_text())["models"][0]
                 self.assertEqual(model["slug"], "gpt-6-astra")
                 self.assertEqual(model["base_instructions"], "Official synthetic instructions")
+                self.assertEqual(self.server.state._codex_public_instructions,
+                                 ("gpt-6-astra", "Official synthetic instructions"))
                 self.assertEqual(model["model_messages"], self.catalog["models"][0]["model_messages"])
                 self.assertEqual(model["context_window"], 272000)
                 self.assertEqual(model["apply_patch_tool_type"], "freeform")
@@ -276,11 +280,18 @@ class InstalledCodexGatewayTests(unittest.TestCase):
     def _assert_standard_round_trip(self, *, chatgpt):
         from privacy_gateway.server import GatewayServer, GatewayState, Handler
         from privacy_gateway.redaction import Policy
+        from privacy_gateway.semantic import SemanticScanner
 
         email = "synthetic.person@example.com"
         captured = []
         native_payloads = []
-        state = GatewayState(provider="codex", mode="auto", policy=Policy.from_dict({}))
+        local_inputs = []
+        def detect(system, text, schema):
+            local_inputs.append(text)
+            return {"entities": []}
+        scanner = SemanticScanner(SimpleNamespace(generate_json=detect))
+        state = GatewayState(provider="codex", mode="auto", policy=Policy.from_dict({}),
+                             semantic_scanner=scanner)
         read_json = Handler.read_json
         def capture_native(handler):
             payload = read_json(handler)
@@ -360,6 +371,9 @@ class InstalledCodexGatewayTests(unittest.TestCase):
                 # paths send the native base instructions. Public prose such
                 # as "basic instructions" must not rename this protocol key.
                 self.assertEqual(native_payloads[0]["instructions"], source_model["base_instructions"])
+                self.assertEqual(state.public_instruction_chars_skipped, len(source_model["base_instructions"]))
+                self.assertTrue(local_inputs)  # Remaining request content still reaches the local detector.
+                self.assertGreater(scanner.snapshot()["completed_chunks"], 0)
                 self.assertTrue(data["instructions"])
                 self.assertEqual(data["instructions"], state.redactor.redact_text(source_model["base_instructions"]))
                 # Masking must not discard/reorder native permissions,

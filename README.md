@@ -137,10 +137,23 @@ The upstream Claude executable is not patched or renamed.
 MaskCode starts and stops its own protected Ollama process, reusing your installed
 model files. It leaves an existing Ollama service alone. The first scan loads the
 model and can take tens of seconds; unchanged scan chunks are cached in memory.
-The terminal shows local scanning progress. A failed or invalid local scan blocks
+Once loaded, the detector stays resident for the MaskCode session instead of
+unloading after an idle timeout. This keeps its model memory allocated until you
+exit MaskCode; the owned process still stops on normal exit.
+The Claude interface shows local scanning progress. Native Codex shows its own
+Working timer across local masking and the buffered cloud reply; it has no live
+MaskCode progress callback. Its launcher explains this before startup and prints
+numeric local-scan timing after Codex exits. A failed or invalid local scan blocks
 that request, with no automatic cloud fallback. Choose another installed detector
 with `--mask-local-model NAME`; `--mask-rules-only` explicitly disables AI detection.
 It does not download models automatically.
+
+For Codex, the launcher recognizes the exact public base instructions from the
+installed client's bundled model catalog. Only an identical top-level instruction
+string for that model skips local AI extraction. Deterministic masking still runs
+on it; edited instructions, prompts, files, tool definitions/results, and nested
+copies continue through detection. This avoids repeatedly classifying the same
+public instructions. It does not remove the initial model load or cloud latency.
 
 Normal exit, SIGTERM and terminal hangup clean up owned processes. SIGKILL or an
 interpreter crash can prevent cleanup; the gateway does not claim crash-proof

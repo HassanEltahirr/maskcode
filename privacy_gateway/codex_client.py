@@ -253,6 +253,9 @@ def protected_codex_launch(server, arguments, *, cwd=None):
     with tempfile.TemporaryDirectory(prefix="maskcode-codex-") as temporary:
         directory = Path(temporary)
         model = _read_bundled_model(binary, server.server_port, directory, selected)
+        base_instructions = model.get("base_instructions")
+        if isinstance(base_instructions, str) and base_instructions:
+            server.state.register_codex_instructions(selected, base_instructions)
         path = directory / "models.json"
         path.write_text(json.dumps({"models": [model]}, ensure_ascii=False), encoding="utf-8")
         path.chmod(0o600)

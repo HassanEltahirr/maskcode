@@ -4,6 +4,7 @@ The child inherits the user's terminal. No PTY emulation, prompt loop, key
 handling, output rewriting, or headless conversion is performed here.
 """
 from pathlib import Path
+import math
 import shutil
 import subprocess
 import sys
@@ -115,6 +116,21 @@ def parse_native(argv):
     return options
 
 
+def format_scan_summary(scan):
+    """Format only valid numeric counters; never include source or diagnostics."""
+    if not isinstance(scan, dict):
+        return None
+    requests = scan.get("requests")
+    seconds = scan.get("total_scan_seconds")
+    chunks, hits = scan.get("scanned_chunks"), scan.get("cache_hits")
+    if (type(requests) is not int or requests <= 0
+            or type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0
+            or type(chunks) is not int or chunks < 0
+            or type(hits) is not int or hits < 0):
+        return None
+    return f"MaskCode local scan: {seconds:.1f}s total · {chunks} chunks scanned · {hits} cache hits."
+
+
 def run_codex(args):
     """Use the installed Codex terminal with MaskCode's shared local scanner."""
     from .cli import start_gateway, launch_codex
@@ -127,14 +143,28 @@ def run_codex(args):
         server = start_gateway(args)
         self_test(server.server_port)
         server.state.network_isolation = True
-        privacy = "local AI + masking" if server.state.semantic_scanner is not None else "rules-only masking"
+        scanner = server.state.semantic_scanner
+        privacy = "local AI + masking" if scanner is not None else "rules-only masking"
         print("MaskCode · " + privacy + " · powered by the installed Codex terminal", file=sys.stderr)
         print("MaskCode enforces the outer sandbox: selected project/state/temp writes; network only through the masking gateway.", file=sys.stderr)
+        if scanner is not None:
+            print("First local scan loads the detector; Codex’s Working timer includes masking and the buffered cloud reply.",
+                  file=sys.stderr, flush=True)
         if args.mode == "review" or args.dashboard:
             print("MaskCode local review: " + server.console_url, file=sys.stderr, flush=True)
             if not args.no_browser:
                 webbrowser.open(server.console_url)
-        return launch_codex(server, args)
+        result = launch_codex(server, args)
+        # The native terminal has returned control. Never redraw or print scan
+        # progress over its active composer, and never let a summary hide errors.
+        if scanner is not None:
+            try:
+                summary = format_scan_summary(scanner.snapshot())
+                if summary:
+                    print(summary, file=sys.stderr, flush=True)
+            except Exception:
+                pass
+        return result
     finally:
         if server is not None:
             server.state.close()

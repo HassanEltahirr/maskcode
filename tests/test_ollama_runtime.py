@@ -40,6 +40,7 @@ class LocalModelTests(unittest.TestCase):
         self.assertEqual(env["OLLAMA_MODELS"], "/models")
         self.assertEqual(env["OLLAMA_NO_CLOUD"], "1")
         self.assertEqual(env["OLLAMA_NOHISTORY"], "1")
+        self.assertEqual(env["OLLAMA_KEEP_ALIVE"], "-1")
         self.assertEqual(env["HOME"], "/temporary")
         for key in malicious:
             if key not in {"OLLAMA_HOST", "OLLAMA_MODELS"}:
@@ -154,6 +155,7 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(args[:2], ("POST", "/api/chat"))
         self.assertEqual(args[2]["model"], "qwen2.5:1.5b")
         self.assertFalse(args[2]["stream"])
+        self.assertEqual(args[2]["keep_alive"], -1)
         self.assertEqual(args[2]["format"], {"type": "object"})
         self.assertEqual(args[2]["options"]["temperature"], 0)
         self.assertNotIn("tools", args[2])

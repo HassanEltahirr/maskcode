@@ -27,6 +27,90 @@ def response(*pairs):
 
 
 class SemanticScannerTests(unittest.TestCase):
+    def test_snapshot_progress_is_available_while_runtime_is_blocked(self):
+        entered, release = threading.Event(), threading.Event()
+        runtime = FakeRuntime()
+        def generate(text):
+            if len(runtime.calls) == 2:
+                entered.set()
+                release.wait(3)
+            return response()
+        runtime.handler = generate
+        scanner = SemanticScanner(runtime)
+        initial = scanner.snapshot()
+        for key in ("last_scan_seconds", "total_scan_seconds", "current_chunks",
+                    "completed_chunks", "current_cache_hits"):
+            self.assertEqual(initial[key], 0)
+        outcomes, observed = [], []
+        def scan():
+            try:
+                outcomes.append(scanner.scan(["a" * 3000, "b" * 3000]))
+            except Exception as error:
+                outcomes.append(error)
+        worker = threading.Thread(target=scan)
+        reader = threading.Thread(target=lambda: observed.append(scanner.snapshot()))
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            reader.start()
+            reader.join(.5)
+            self.assertFalse(reader.is_alive(), "Snapshot waited for local inference")
+            self.assertEqual(observed[0]["status"], "scanning")
+            self.assertEqual(observed[0]["current_chunks"], 2)
+            self.assertEqual(observed[0]["completed_chunks"], 1)
+            self.assertEqual(observed[0]["current_cache_hits"], 0)
+        finally:
+            release.set()
+            worker.join(2)
+            if reader.ident is not None:
+                reader.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(outcomes, [[]])
+        self.assertEqual(scanner.snapshot()["completed_chunks"], 2)
+        self.assertEqual(scanner.snapshot()["status"], "ready")
+
+    def test_cached_and_empty_scans_reset_progress_and_accumulate_monotonic_time(self):
+        runtime = FakeRuntime()
+        scanner = SemanticScanner(runtime)
+        payload = ["a" * 3000, "b" * 3000]
+        with patch.object(semantic.time, "monotonic", side_effect=[10, 12.25, 20, 20.125, 30, 30.0625]):
+            scanner.scan(payload)
+            first = scanner.snapshot()
+            self.assertEqual((first["current_chunks"], first["completed_chunks"], first["current_cache_hits"]), (2, 2, 0))
+            self.assertAlmostEqual(first["last_scan_seconds"], 2.25)
+            self.assertAlmostEqual(first["total_scan_seconds"], 2.25)
+            scanner.scan(payload)
+            cached = scanner.snapshot()
+            self.assertEqual(len(runtime.calls), 2)
+            self.assertEqual((cached["current_chunks"], cached["completed_chunks"], cached["current_cache_hits"]), (2, 2, 2))
+            self.assertAlmostEqual(cached["last_scan_seconds"], .125)
+            self.assertAlmostEqual(cached["total_scan_seconds"], 2.375)
+            scanner.scan([])
+            empty = scanner.snapshot()
+            self.assertEqual((empty["current_chunks"], empty["completed_chunks"], empty["current_cache_hits"]), (0, 0, 0))
+            self.assertEqual(empty["cache_hits"], 2)
+            self.assertAlmostEqual(empty["last_scan_seconds"], .0625)
+            self.assertAlmostEqual(empty["total_scan_seconds"], 2.4375)
+
+    def test_failed_and_invalid_scans_record_time_without_completing_chunks(self):
+        runtime = FakeRuntime(lambda text: response(("invented value", "PERSON")))
+        scanner = SemanticScanner(runtime)
+        with patch.object(semantic.time, "monotonic", side_effect=[100, 102, 110, 111.5]):
+            with self.assertRaises(SemanticScanError):
+                scanner.scan("synthetic source")
+            failed = scanner.snapshot()
+            self.assertEqual(failed["status"], "blocked")
+            self.assertEqual((failed["current_chunks"], failed["completed_chunks"], failed["current_cache_hits"]), (1, 0, 0))
+            self.assertEqual(failed["cache_entries"], 0)
+            self.assertAlmostEqual(failed["last_scan_seconds"], 2)
+            with self.assertRaises(SemanticScanError):
+                scanner.scan(b"invalid source type")
+            invalid = scanner.snapshot()
+            self.assertEqual((invalid["current_chunks"], invalid["completed_chunks"], invalid["current_cache_hits"]), (0, 0, 0))
+            self.assertEqual(len(runtime.calls), 1)
+            self.assertAlmostEqual(invalid["last_scan_seconds"], 1.5)
+            self.assertAlmostEqual(invalid["total_scan_seconds"], 3.5)
+
     def test_exact_multilingual_values_are_extracted_without_rewriting_or_escaping(self):
         values = [('Alice "Ally" Chen', "PERSON"), (r"C:\Private\Acme", "IDENTIFIER"),
                   ("مشروع النور", "PROJECT"), ("محمد علي", "PERSON")]

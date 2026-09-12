@@ -14,6 +14,7 @@ import json
 import math
 import re
 import threading
+import time
 
 
 LABELS = ("PERSON", "ORG", "LOCATION", "PROJECT", "IDENTIFIER", "FINANCIAL", "SENSITIVE")
@@ -101,6 +102,9 @@ class SemanticScanner:
         self._status = "ready"
         self._counts = {"requests": 0, "scanned_chunks": 0, "cache_hits": 0,
                         "entities": 0, "blocked_requests": 0}
+        self._progress = {"last_scan_seconds": 0.0, "total_scan_seconds": 0.0,
+                          "current_chunks": 0, "completed_chunks": 0,
+                          "current_cache_hits": 0}
 
     @staticmethod
     def _digest(value):
@@ -256,8 +260,10 @@ class SemanticScanner:
     def scan(self, payload):
         """Return exact ``(value, label)`` pairs or fail the complete scan."""
         with self._scan_lock:
+            started = time.monotonic()
             with self._state_lock:
                 self._counts["requests"] += 1
+                self._progress.update(current_chunks=0, completed_chunks=0, current_cache_hits=0)
                 if not self._closed.is_set():
                     self._status = "scanning"
             try:
@@ -265,6 +271,8 @@ class SemanticScanner:
                     raise SemanticScanError()
                 # Validate all input/chunk limits before invoking the runtime.
                 chunks = self._chunks(self._sources(payload))
+                with self._state_lock:
+                    self._progress["current_chunks"] = len(chunks)
                 found, seen = [], set()
                 for text, fragments, key in chunks:
                     if self._closed.is_set():
@@ -274,6 +282,7 @@ class SemanticScanner:
                         if cached is not None:
                             self._cache.move_to_end(key)
                             self._counts["cache_hits"] += 1
+                            self._progress["current_cache_hits"] += 1
                     if cached is None:
                         result = self.runtime.generate_json(SYSTEM_PROMPT, text, copy.deepcopy(SCHEMA))
                         if self._closed.is_set():
@@ -284,6 +293,8 @@ class SemanticScanner:
                             self._counts["scanned_chunks"] += 1
                     else:
                         entities = cached[0]
+                    with self._state_lock:
+                        self._progress["completed_chunks"] += 1
                     for value, label in entities:
                         if value not in seen:
                             if len(found) >= MAX_ENTITIES:
@@ -302,11 +313,18 @@ class SemanticScanner:
                     if not self._closed.is_set():
                         self._status = "blocked"
                 raise SemanticScanError() from None
+            finally:
+                # Includes validation and cache work, but not time queued behind
+                # another scan. Snapshot never waits for the inference lock.
+                elapsed = max(0.0, time.monotonic() - started)
+                with self._state_lock:
+                    self._progress["last_scan_seconds"] = elapsed
+                    self._progress["total_scan_seconds"] += elapsed
 
     def snapshot(self):
         with self._state_lock:
             return {"enabled": not self._closed.is_set(), "status": self._status,
-                    **self._counts, "cache_entries": len(self._cache)}
+                    **self._counts, **self._progress, "cache_entries": len(self._cache)}
 
     def close(self):
         """Cancel without waiting for the scan lock; the runtime stops inference."""

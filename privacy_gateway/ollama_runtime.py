@@ -78,7 +78,7 @@ def _environment(binary, models, runtime_home, port):
         "OLLAMA_MAX_LOADED_MODELS": "1",
         "OLLAMA_MAX_QUEUE": "4",
         "OLLAMA_CONTEXT_LENGTH": "8192",
-        "OLLAMA_KEEP_ALIVE": "10m",
+        "OLLAMA_KEEP_ALIVE": "-1",
         "OLLAMA_LOAD_TIMEOUT": "90s",
         "OLLAMA_ORIGINS": "http://127.0.0.1",
         "NO_PROXY": "*",
@@ -261,7 +261,9 @@ class ManagedOllama:
         with self._lock:
             result = self._request("POST", "/api/chat", {
                 "model": self.model, "messages": messages, "format": schema,
-                "stream": False, "keep_alive": "10m",
+                # Keep the owned detector loaded until MaskCode closes its
+                # process. An idle chat must not repeat costly Metal startup.
+                "stream": False, "keep_alive": -1,
                 "options": {"temperature": 0, "seed": 0, "num_ctx": 8192, "num_predict": 2048},
             }, timeout=timeout)
         try:
