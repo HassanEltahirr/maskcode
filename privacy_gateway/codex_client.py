@@ -195,6 +195,9 @@ def _settings(provider, base_url, catalog_path, model):
         "otel.metrics_exporter": "none",
         "otel.log_user_prompt": False,
         "check_for_update_on_startup": False,
+        # Host skill discovery is intentionally disabled below. Suppress its
+        # generic unstable-feature banner for this launch only, not globally.
+        "suppress_unstable_features_warning": True,
         "features.enable_request_compression": False,
         "features.unbounded_connection_retries": False,
         "features.apps": False,

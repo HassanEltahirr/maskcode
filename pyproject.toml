@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maskcode"
-version = "0.7.2"
+version = "0.7.3"
 description = "A coding terminal with local Ollama privacy detection and a masking gateway"
 readme = "README.md"
 license = "MIT"

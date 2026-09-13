@@ -327,6 +327,10 @@ Files / prompt → official agent → rules → local Ollama span detection
   loopback/public destinations are blocked. Startup fails without enforcement.
   It disables inherited injection knobs, unsafe customizations and alternate
   transports. There is no direct-provider fallback.
+  Codex host skill discovery is deliberately disabled using its
+  `skip_host_skill_discovery` feature. Codex currently labels that feature under
+  development; MaskCode suppresses the generic unstable-feature startup banner
+  for its own launches, without changing your global Codex configuration.
 - The local detector runs in a separate process with external TCP/UDP sockets
   blocked and model files read-only. Loopback TCP remains available for Ollama's
   internal runner. Its temporary state is cleaned up at exit. This is not a

@@ -1,5 +1,17 @@
 # MaskCode validation
 
+## 0.7.3 — Codex startup warning
+
+MaskCode now suppresses Codex's generic unstable-feature banner for its own
+launches. The intentional `skip_host_skill_discovery` restriction remains
+enabled; the user's global Codex configuration is unchanged. This is a display
+change and does not reduce cold model-loading time or change masking behavior.
+
+- All 19 Codex client tests passed in 2.602 s with the installed-client opt-in,
+  including local fixture-provider integration using synthetic credentials.
+- No new cloud inference requests were made for this patch. Earlier live cloud
+  evidence below remains specific to 0.7.0.
+
 ## 0.7.2 — local scan latency
 
 Local-only probes on the same M1 Mac identified cold Qwen loading as the main
