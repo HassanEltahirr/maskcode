@@ -330,10 +330,12 @@ class TerminalApp:
         status = self.status
         if scan.get("enabled"):
             mode = "AI + " + mode
-            if scan.get("status") == "scanning":
-                status = "Checking sensitive data locally · " + str(scan.get("completed_chunks", 0)) + "/" + str(scan.get("current_chunks", 0)) + " chunks checked"
-            elif scan.get("status") == "blocked":
+            if scan.get("status") == "blocked":
                 status = "Local privacy scan blocked · /privacy"
+            elif scan.get("warmup_status") == "loading":
+                status = "Loading local privacy model" if self.busy else "Preparing local privacy model · you can type"
+            elif scan.get("status") == "scanning":
+                status = "Checking sensitive data locally · " + str(scan.get("completed_chunks", 0)) + "/" + str(scan.get("current_chunks", 0)) + " chunks checked"
         if not self.busy and self._snapshot.get("last_upstream_status") == 429:
             status = "Provider rate limit (429) · try later or /model"
         return [("class:status.key", " " + mode + " "),

@@ -112,6 +112,41 @@ class CodexLaunchTests(unittest.TestCase):
         args = ["--model", "other-model", "exec", "--json", "a prompt"]
         self.assertEqual(validate_codex_arguments(args), (args, "other-model", 2))
 
+    def test_explicit_effort_must_match_installed_model_capabilities(self):
+        self.catalog["models"][0]["supported_reasoning_levels"] = [{"effort": "medium"}]
+        which, run = self.launch_patches()
+        with which, run:
+            with protected_codex_launch(self.server, [], reasoning_effort="medium") as (argv, env):
+                settings = dict(arg.split("=", 1) for index, arg in enumerate(argv)
+                                if index and argv[index - 1] == "-c")
+                self.assertEqual(settings["model_reasoning_effort"], '"medium"')
+                self.assertNotIn("service_tier", settings)
+            for effort in ("high", "arbitrary", ["medium"], True):
+                with self.subTest(effort=effort), self.assertRaises(CodexConfigurationError):
+                    with protected_codex_launch(self.server, [], reasoning_effort=effort):
+                        self.fail("unsupported effort reached launch")
+
+    def test_effective_cd_and_relative_additional_directories_are_protected_before_launch(self):
+        with tempfile.TemporaryDirectory(prefix="maskcode-codex-roots-") as temporary:
+            root = Path(temporary).resolve()
+            project, extra, alias = root / "project", root / "extra", root / "selected-alias"
+            project.mkdir()
+            extra.mkdir()
+            alias.symlink_to(project, target_is_directory=True)
+            which, run = self.launch_patches()
+            with which, run:
+                with protected_codex_launch(self.server, ["-C", str(alias), "--add-dir", "../extra",
+                        "--add-dir=" + str(extra)], cwd=root):
+                    values = [value for value, _ in self.server.state.policy.literals]
+                    self.assertEqual(set(values), {str(project), str(alias), str(extra)})
+                    self.assertEqual(len(values), 3)
+                    self.assertNotIn(str(root), values)
+                    for path in (project, alias, extra):
+                        original = str(path / "file.py")
+                        clean = self.server.state.redactor.redact_text(original)
+                        self.assertNotIn(str(path), clean)
+                        self.assertEqual(self.server.state.redactor.restore_text(clean), original)
+
     def test_prompt_and_option_values_are_not_reinterpreted_as_commands(self):
         args = ["--output-schema", "exec", "exec", "--", "login"]
         self.assertEqual(validate_codex_arguments(args)[2], 2)
@@ -178,6 +213,8 @@ class CodexLaunchTests(unittest.TestCase):
                 self.assertEqual(settings["features.hooks"], "false")
                 self.assertEqual(settings["sandbox_mode"], '"danger-full-access"')
                 self.assertEqual(settings["approval_policy"], '"on-request"')
+                self.assertNotIn("model_reasoning_effort", settings)
+                self.assertNotIn("service_tier", settings)
                 metadata_env = discover.call_args.kwargs["env"]
                 self.assertNotIn("OPENAI_API_KEY", metadata_env)
                 self.assertNotIn("CODEX_API_KEY", metadata_env)
@@ -275,9 +312,9 @@ class InstalledCodexGatewayTests(unittest.TestCase):
         self._assert_standard_round_trip(chatgpt=False)
 
     def test_subscription_auth_preserves_native_bundled_instructions_and_context(self):
-        self._assert_standard_round_trip(chatgpt=True)
+        self._assert_standard_round_trip(chatgpt=True, reasoning_effort="medium")
 
-    def _assert_standard_round_trip(self, *, chatgpt):
+    def _assert_standard_round_trip(self, *, chatgpt, reasoning_effort=None):
         from privacy_gateway.server import GatewayServer, GatewayState, Handler
         from privacy_gateway.redaction import Policy
         from privacy_gateway.semantic import SemanticScanner
@@ -350,7 +387,8 @@ class InstalledCodexGatewayTests(unittest.TestCase):
                     Path(temp, "auth.json").write_text(json.dumps({"OPENAI_API_KEY": auth_token}))
                 with patch.dict(os.environ, local_env, clear=True):
                     with protected_codex_launch(server, ["exec", "--model", "gpt-6-astra", "--ephemeral",
-                            "--skip-git-repo-check", "--json", "Reply only with this synthetic email: " + email], cwd=temp) as (argv, env):
+                            "--skip-git-repo-check", "--json", "Reply only with this synthetic email: " + email],
+                            cwd=temp, reasoning_effort=reasoning_effort) as (argv, env):
                         settings = dict(arg.split("=", 1) for index, arg in enumerate(argv)
                                         if index and argv[index - 1] == "-c")
                         source_model = json.loads(Path(json.loads(settings["model_catalog_json"])).read_text())["models"][0]
@@ -367,6 +405,13 @@ class InstalledCodexGatewayTests(unittest.TestCase):
                 data = json.loads(outgoing)
                 self.assertEqual(data["model"], "gpt-6-astra")
                 self.assertEqual(len(native_payloads), 1)
+                if reasoning_effort is not None:
+                    # The installed exec CLI must retain the scoped override
+                    # despite --ignore-user-config, and the gateway must keep it.
+                    self.assertEqual(native_payloads[0]["reasoning"]["effort"], reasoning_effort)
+                    self.assertEqual(data["reasoning"]["effort"], reasoning_effort)
+                else:
+                    self.assertNotIn("model_reasoning_effort", settings)
                 # Capture before any gateway processing: both authentication
                 # paths send the native base instructions. Public prose such
                 # as "basic instructions" must not rename this protocol key.
@@ -378,7 +423,16 @@ class InstalledCodexGatewayTests(unittest.TestCase):
                 self.assertEqual(data["instructions"], state.redactor.redact_text(source_model["base_instructions"]))
                 # Masking must not discard/reorder native permissions,
                 # collaboration context, or the user's messages.
-                self.assertEqual(data["input"], state.redactor.redact_json(native_payloads[0]["input"]))
+                expected_input = copy.deepcopy(native_payloads[0]["input"])
+                self.assertEqual(len(data["input"]), len(expected_input))
+                for outgoing_item, original_item in zip(data["input"], expected_input):
+                    if "id" in original_item and "id" not in outgoing_item:
+                        self.assertEqual(original_item.get("type", "message"), "message")
+                        self.assertIn(original_item.get("role"), {"user", "assistant", "system", "developer"})
+                        self.assertRegex(original_item["id"],
+                            r"\Amsg_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
+                        del original_item["id"]
+                self.assertEqual(data["input"], state.redactor.redact_json(expected_input))
                 self.assertTrue(any(t.get("name") == "apply_patch" and t.get("type") == "custom" for t in data["tools"]))
                 self.assertTrue(any(t.get("type") == "namespace" for t in data["tools"]))
                 self.assertEqual(headers["authorization"], "Bearer " + auth_token)
@@ -399,124 +453,183 @@ class InstalledCodexGatewayTests(unittest.TestCase):
 
 
     def test_real_agent_reads_patches_and_runs_tests_with_masked_context(self):
-        from privacy_gateway.server import GatewayServer, GatewayState
-        from privacy_gateway.redaction import Policy
+        _assert_agentic_round_trip(self)
 
-        email = "synthetic.person@example.com"
-        captured = []
-        failures = []
-        with tempfile.TemporaryDirectory(prefix="maskcode-codex-workflow-") as temporary:
-            work = Path(temporary).resolve()
-            (work / "contact.py").write_text('CONTACT_EMAIL = "' + email + '"\nRETRY_COUNT = 1\n')
-            (work / "tests").mkdir()
-            (work / "tests" / "test_contact.py").write_text(
-                'import unittest\nfrom contact import CONTACT_EMAIL, RETRY_COUNT\n'
-                'class TestContact(unittest.TestCase):\n'
-                '    def test_contact_is_preserved(self):\n'
-                '        self.assertEqual(CONTACT_EMAIL, "' + email + '")\n'
-                '        self.assertEqual(RETRY_COUNT, 2)\n')
-            config = work / "local-client-config"
-            config.mkdir()
-            (config / "auth.json").write_text('{"OPENAI_API_KEY":"sk-synthetic-local-test-only"}')
-            state = GatewayState(provider="codex", mode="auto", policy=Policy.from_dict({"literals": [
-                {"value": str(work), "label": "SYNTHETIC_PROJECT"}]}))
-            token = state.redactor.redact_text(email)
-            work_token = state.redactor.redact_text(str(work))
 
-            def tool_output(data, call_id):
-                return next((item.get("output") for item in data.get("input", [])
-                             if item.get("call_id") == call_id and item.get("type") in
-                             ("function_call_output", "custom_tool_call_output")), None)
+def _assert_agentic_round_trip(self, *, semantic_scanner=None, local_runtime=None, semantic_person=None):
+    """One real native coding loop; every provider response stays local and synthetic."""
+    from privacy_gateway.server import GatewayServer, GatewayState
+    from privacy_gateway.redaction import Policy
 
-            def stream(step, tool_type=None, name=None, value=None):
-                ident = "item_synthetic_" + str(step)
-                if tool_type:
-                    field = "arguments" if tool_type == "function_call" else "input"
-                    item = {"type": tool_type, "id": ident, "call_id": "call_synthetic_" + str(step),
-                            "name": name, field: value, "status": "completed"}
-                else:
-                    item = {"type": "message", "id": ident, "role": "assistant", "status": "completed", "phase": "final_answer",
-                            "content": [{"type": "output_text", "text": "Tests passed; contact preserved.", "annotations": []}]}
-                response = {"id": "resp_synthetic_" + str(step), "object": "response", "created_at": 1,
-                            "status": "completed", "model": "gpt-6-astra", "output": [item],
-                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
-                packets = [{"type": "response.created", "response": {**response, "status": "in_progress", "output": []}}]
-                if tool_type:
-                    packets.append({"type": "response.output_item.added", "output_index": 0, "item": {**item, field: "", "status": "in_progress"}})
-                    lane = "function_call_arguments" if tool_type == "function_call" else "custom_tool_call_input"
-                    packets.append({"type": "response." + lane + ".delta", "item_id": ident, "output_index": 0, "delta": value})
-                    packets.append({"type": "response." + lane + ".done", "item_id": ident, "output_index": 0, field: value})
-                else:
-                    packets.append({"type": "response.output_item.added", "output_index": 0,
-                                    "item": {**item, "status": "in_progress", "content": []}})
-                    packets.append({"type": "response.output_text.delta", "item_id": ident, "output_index": 0,
-                                    "content_index": 0, "delta": item["content"][0]["text"]})
-                packets += [{"type": "response.output_item.done", "output_index": 0, "item": item},
-                            {"type": "response.completed", "response": response}]
-                return 200, "text/event-stream", "".join("event: " + packet["type"] + "\ndata: " + json.dumps(packet) + "\n\n" for packet in packets).encode()
+    email = "synthetic.person@example.com"
+    reviewer_comment = "# Private reviewer: " + semantic_person + "\n" if semantic_person is not None else ""
+    original_file = reviewer_comment + 'CONTACT_EMAIL = "' + email + '"\nRETRY_COUNT = 1\n'
+    expected_file = reviewer_comment + 'CONTACT_EMAIL = "' + email + '"\nRETRY_COUNT = 2\n'
+    captured = []
+    failures = []
+    with tempfile.TemporaryDirectory(prefix="maskcode-codex-workflow-") as temporary:
+        work = Path(temporary).resolve()
+        (work / "contact.py").write_text(original_file)
+        (work / "tests").mkdir()
+        (work / "tests" / "test_contact.py").write_text(
+            'import unittest\nfrom contact import CONTACT_EMAIL, RETRY_COUNT\n'
+            'class TestContact(unittest.TestCase):\n'
+            '    def test_contact_is_preserved(self):\n'
+            '        self.assertEqual(CONTACT_EMAIL, "' + email + '")\n'
+            '        self.assertEqual(RETRY_COUNT, 2)\n')
+        config = work / "local-client-config"
+        config.mkdir()
+        (config / "auth.json").write_text('{"OPENAI_API_KEY":"sk-synthetic-local-test-only"}')
+        state = GatewayState(provider="codex", mode="auto", policy=Policy.from_dict({"literals": [
+            {"value": str(work), "label": "SYNTHETIC_PROJECT"}]}), semantic_scanner=semantic_scanner, local_runtime=local_runtime)
+        token = state.redactor.redact_text(email)
+        work_token = state.redactor.redact_text(str(work))
+        if semantic_person is not None:
+            # Establish that neither the explicit policy nor builtin rules
+            # knows this name before the local model reads the file.
+            self.assertEqual(state.redactor.redact_text(semantic_person), semantic_person)
 
-            def fake_transport(path, body, headers):
-                try:
-                    self.assertEqual(path, "/responses")
-                    self.assertNotIn(email.encode(), body)
-                    self.assertNotIn(str(work).encode(), body)
-                    data = json.loads(body)
-                    captured.append(data)
-                    step = len(captured)
-                    if step == 1:
-                        return stream(step, "function_call", "exec_command", json.dumps({
-                            "cmd": "cat contact.py", "workdir": work_token, "max_output_tokens": 2000}))
-                    if step == 2:
-                        read = tool_output(data, "call_synthetic_1")
-                        self.assertIsNotNone(read)
-                        self.assertIn(token, json.dumps(read))
-                        self.assertIn("RETRY_COUNT = 1", json.dumps(read))
-                        patch_text = ("*** Begin Patch\n*** Update File: " + work_token + "/contact.py\n@@\n"
-                                      ' CONTACT_EMAIL = "' + token + '"\n-RETRY_COUNT = 1\n+RETRY_COUNT = 2\n*** End Patch\n')
-                        return stream(step, "custom_tool_call", "apply_patch", patch_text)
-                    if step == 3:
-                        edited = tool_output(data, "call_synthetic_2")
-                        self.assertIsNotNone(edited)
-                        self.assertIn("Success", json.dumps(edited))
-                        self.assertEqual((work / "contact.py").read_text(), 'CONTACT_EMAIL = "' + email + '"\nRETRY_COUNT = 2\n')
-                        return stream(step, "function_call", "exec_command", json.dumps({
-                            "cmd": "python3 -m unittest discover -s tests -q", "workdir": work_token,
-                            "max_output_tokens": 2000, "yield_time_ms": 1000}))
-                    if step == 4:
-                        output = tool_output(data, "call_synthetic_3")
-                        self.assertIsNotNone(output)
-                        self.assertIn("OK", json.dumps(output))
-                        return stream(step)
-                    self.fail("Unexpected extra synthetic model request")
-                except Exception as exc:
-                    failures.append(type(exc).__name__ + ": " + str(exc))
-                    raise
+        def tool_output(data, call_id):
+            return next((item.get("output") for item in data.get("input", [])
+                         if item.get("call_id") == call_id and item.get("type") in
+                         ("function_call_output", "custom_tool_call_output")), None)
 
-            state.transport = fake_transport
-            server = GatewayServer(state)
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
+        def stream(step, tool_type=None, name=None, value=None):
+            ident = "item_synthetic_" + str(step)
+            if tool_type:
+                field = "arguments" if tool_type == "function_call" else "input"
+                item = {"type": tool_type, "id": ident, "call_id": "call_synthetic_" + str(step),
+                        "name": name, field: value, "status": "completed"}
+            else:
+                item = {"type": "message", "id": ident, "role": "assistant", "status": "completed", "phase": "final_answer",
+                        "content": [{"type": "output_text", "text": "Tests passed; contact preserved.", "annotations": []}]}
+            response = {"id": "resp_synthetic_" + str(step), "object": "response", "created_at": 1,
+                        "status": "completed", "model": "gpt-6-astra", "output": [item],
+                        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
+            packets = [{"type": "response.created", "response": {**response, "status": "in_progress", "output": []}}]
+            if tool_type:
+                packets.append({"type": "response.output_item.added", "output_index": 0, "item": {**item, field: "", "status": "in_progress"}})
+                lane = "function_call_arguments" if tool_type == "function_call" else "custom_tool_call_input"
+                packets.append({"type": "response." + lane + ".delta", "item_id": ident, "output_index": 0, "delta": value})
+                packets.append({"type": "response." + lane + ".done", "item_id": ident, "output_index": 0, field: value})
+            else:
+                packets.append({"type": "response.output_item.added", "output_index": 0,
+                                "item": {**item, "status": "in_progress", "content": []}})
+                packets.append({"type": "response.output_text.delta", "item_id": ident, "output_index": 0,
+                                "content_index": 0, "delta": item["content"][0]["text"]})
+            packets += [{"type": "response.output_item.done", "output_index": 0, "item": item},
+                        {"type": "response.completed", "response": response}]
+            return 200, "text/event-stream", "".join("event: " + packet["type"] + "\ndata: " + json.dumps(packet) + "\n\n" for packet in packets).encode()
+
+        def fake_transport(path, body, headers):
             try:
-                local_env = {"PATH": os.environ["PATH"], "HOME": str(config), "CODEX_HOME": str(config),
-                             "OPENAI_API_KEY": "sk-synthetic-local-test-only", "NO_COLOR": "1"}
-                with patch.dict(os.environ, local_env, clear=True):
-                    with protected_codex_launch(server, ["exec", "--model", "gpt-6-astra", "--ephemeral",
-                            "--skip-git-repo-check", "--json", "Read contact.py, change retries to2 while preserving the email, and run unittest."], cwd=work) as (argv, env):
-                        result = subprocess.run(argv, cwd=work, env=env, input="", text=True,
-                                                capture_output=True, timeout=40)
-                self.assertEqual(failures, [])
-                self.assertEqual(result.returncode, 0, json.dumps({"forwarded": state.forwarded, "blocked": state.blocked,
-                                 "stdout": result.stdout[-1800:], "stderr": result.stderr[-600:]}))
-                self.assertEqual(len(captured), 4)
-                self.assertEqual(state.blocked, 0)
-                self.assertEqual(state.forwarded, 4)
-                self.assertIn("Tests passed; contact preserved.", result.stdout)
-                self.assertEqual((work / "contact.py").read_text(), 'CONTACT_EMAIL = "' + email + '"\nRETRY_COUNT = 2\n')
-            finally:
-                state.close()
-                server.shutdown()
-                server.server_close()
-                thread.join(2)
+                self.assertEqual(path, "/responses")
+                self.assertNotIn(email.encode(), body)
+                self.assertNotIn(str(work).encode(), body)
+                data = json.loads(body)
+                captured.append(data)
+                step = len(captured)
+                if semantic_person is not None and step >= 2:
+                    self.assertNotIn(semantic_person.encode(), body)
+                    issued = state.redactor.restoration_tokens()
+                    person_token = state.redactor.redact_text(semantic_person)
+                    self.assertIn(person_token, issued, "The local detector must identify the whole unconfigured name")
+                    self.assertEqual(state.redactor.restore_text(person_token), semantic_person)
+                    self.assertIn(person_token.encode(), body)
+                if step == 1:
+                    return stream(step, "function_call", "exec_command", json.dumps({
+                        "cmd": "cat contact.py", "workdir": work_token, "max_output_tokens": 2000}))
+                if step == 2:
+                    read = tool_output(data, "call_synthetic_1")
+                    self.assertIsNotNone(read)
+                    self.assertIn(token, json.dumps(read))
+                    self.assertIn("RETRY_COUNT = 1", json.dumps(read))
+                    patch_text = ("*** Begin Patch\n*** Update File: " + work_token + "/contact.py\n@@\n"
+                                  ' CONTACT_EMAIL = "' + token + '"\n-RETRY_COUNT = 1\n+RETRY_COUNT = 2\n*** End Patch\n')
+                    return stream(step, "custom_tool_call", "apply_patch", patch_text)
+                if step == 3:
+                    edited = tool_output(data, "call_synthetic_2")
+                    self.assertIsNotNone(edited)
+                    self.assertIn("Success", json.dumps(edited))
+                    self.assertEqual((work / "contact.py").read_text(), expected_file)
+                    return stream(step, "function_call", "exec_command", json.dumps({
+                        "cmd": "python3 -m unittest discover -s tests -q", "workdir": work_token,
+                        "max_output_tokens": 2000, "yield_time_ms": 1000}))
+                if step == 4:
+                    output = tool_output(data, "call_synthetic_3")
+                    self.assertIsNotNone(output)
+                    self.assertIn("OK", json.dumps(output))
+                    return stream(step)
+                self.fail("Unexpected extra synthetic model request")
+            except Exception as exc:
+                failures.append(type(exc).__name__ + ": " + str(exc))
+                raise
+
+        state.transport = fake_transport
+        server = GatewayServer(state)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            local_env = {"PATH": os.environ["PATH"], "HOME": str(config), "CODEX_HOME": str(config),
+                         "OPENAI_API_KEY": "sk-synthetic-local-test-only", "NO_COLOR": "1"}
+            with patch.dict(os.environ, local_env, clear=True):
+                with protected_codex_launch(server, ["exec", "--model", "gpt-6-astra", "--ephemeral",
+                        "--skip-git-repo-check", "--json", "Read contact.py, change retries to2 while preserving the email, and run unittest."], cwd=work) as (argv, env):
+                    result = subprocess.run(argv, cwd=work, env=env, input="", text=True,
+                                            capture_output=True, timeout=300 if semantic_scanner is not None else 40)
+            self.assertEqual(failures, [])
+            self.assertEqual(result.returncode, 0, json.dumps({"forwarded": state.forwarded, "blocked": state.blocked,
+                             "stdout": result.stdout[-1800:], "stderr": result.stderr[-600:],
+                             "local_scan": semantic_scanner.snapshot() if semantic_scanner is not None else None}))
+            self.assertEqual(len(captured), 4)
+            self.assertEqual(state.blocked, 0)
+            self.assertEqual(state.forwarded, 4)
+            if semantic_scanner is not None:
+                local_scan = semantic_scanner.snapshot()
+                self.assertEqual(local_scan["requests"], 4)
+                self.assertEqual(local_scan["blocked_requests"], 0)
+                self.assertEqual(local_scan["completed_chunks"], local_scan["current_chunks"])
+                self.assertGreater(local_scan["scanned_chunks"], 0)
+                self.assertGreater(local_scan["cache_hits"], 0)
+                self.assertGreater(local_scan["total_scan_seconds"], 0)
+                self.assertGreater(state.public_instruction_chars_skipped, 0)
+            self.assertIn("Tests passed; contact preserved.", result.stdout)
+            self.assertEqual((work / "contact.py").read_text(), expected_file)
+        finally:
+            state.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(2)
+
+
+
+@unittest.skipUnless(os.environ.get("MASKCODE_TEST_LOCAL_OLLAMA") == "1"
+                     and platform.system() == "Darwin" and find_codex_binary(),
+                     "Opt-in real local Qwen + installed Codex; dummy auth and local fake provider only")
+class InstalledCodexLocalHybridTests(unittest.TestCase):
+    def test_real_local_detector_covers_all_four_native_coding_turns(self):
+        from privacy_gateway.ollama_runtime import ManagedOllama
+        from privacy_gateway.semantic import SemanticScanner
+
+        runtime = ManagedOllama()
+        scanner = None
+        process = None
+        temporary_home = None
+        try:
+            runtime.start().prewarm()
+            self.assertTrue(runtime.network_isolation)
+            process = runtime._process
+            temporary_home = runtime._temporary_home.name
+            scanner = SemanticScanner(runtime)
+            _assert_agentic_round_trip(self, semantic_scanner=scanner, local_runtime=runtime,
+                                      semantic_person="Mira Zorvan")
+        finally:
+            if scanner is not None:
+                scanner.close()
+            runtime.close()
+        self.assertIsNotNone(process.poll())
+        self.assertFalse(Path(temporary_home).exists())
+        self.assertFalse(runtime.network_isolation)
 
 
 if __name__ == "__main__":

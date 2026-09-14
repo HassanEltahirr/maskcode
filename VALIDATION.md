@@ -1,5 +1,139 @@
 # MaskCode validation
 
+## 0.8.0 — streaming and response latency
+
+Codex now receives incrementally restored display text, including text after
+opaque reasoning. Tool events, all events following a tool, and successful
+completion remain held until clean upstream EOF and full stream/patch validation.
+The installed Codex client emitted a restored synthetic message before the
+fixture provider finished its response. Interrupted streams can display partial
+text; they cannot release unvalidated tools or successful completion.
+
+Local scanning reuses identical batches after conversation items move. In a
+synthetic four-source conversation, adding one short question caused nine new
+detector calls before this change and one afterward (eight cache hits). This
+measures call reuse, not a claimed nine-fold wall-clock speedup. Changed source
+text, dictionary context, nesting, and batch contents still require scans.
+Exact, previously validated short-batch layouts now remain reusable after short
+insertions too. Layout metadata is hash-only, bounded, and evicted with its cache
+entry. Repair results use a separate key that includes the repair instructions.
+If cached layouts would fragment a small request beyond the chunk limit, planning
+retries once with ordinary batching. Real input and chunk limits still block.
+
+Recoverable invalid detector dictionaries receive at most one local retry with the same
+source and schema plus a fixed validation reminder. Rejected content is never
+added to the prompt. Tests cover invalid-then-valid reuse, invalid-then-invalid,
+timeout, closure, source/context changes, token protection, and cache bounds.
+Runtime errors and timeouts are not retried; failed validation still blocks.
+Individually valid first-attempt spans are retained only after a complete repair
+validates, with combined entity limits enforced. A repair cannot silently discard
+a previously detected sensitive span.
+Oversized entity lists block before repair. Prompt guidance distinguishes ordinary
+programming counts, indices, timeouts, exit codes and test constants from
+contextually confidential identifiers and amounts; numeric gateway checks remain
+unchanged.
+
+A real local-model fixture exposed repeated classification of placeholder
+fragments. The detector's input now replaces only already-protected placeholder
+characters with equal-length spaces, including split tokens at chunk edges.
+Surrounding text stays intact. Validation still checks the original source and
+protected ranges; cache keys include both original identity and exact detector
+input. Invalid token claims still block if the model invents them.
+
+Actual Codex fixtures also exposed discovery of fixed roles, token-limit numbers
+in replayed provider tool calls, and generated protocol IDs. Public role and
+built-in tool vocabulary is excluded only from semantic discovery; explicit
+policies still apply. Codex drops exact native lowercase UUIDv7 bookkeeping IDs
+only from direct input messages and function/custom tool outputs (`msg_`, `fco_`,
+`ctco_`). Tool correlation IDs, output content, arbitrary IDs, nested copies and
+non-Codex requests retain their checks.
+
+A separate bounded registry admits only typed IDs and exact Codex tool-call cores
+from completely validated provider replies, after clean stream EOF. It stores
+at most 2,048 hashes; identifiers are bounded to 256 characters and call bodies to
+256 Ki characters. The local discovery view can omit matching direct replay
+fields. Both raw arguments and their exact sanitizer-produced compact JSON form
+are recognized, with duplicate keys/nonfinite values rejected and key order
+preserved. Changed body/name/call ID/namespace, unknown keys, changed metadata,
+content copies and all tool results remain inspected. The outgoing payload still
+passes deterministic masking before and after discovery. Close clears the
+registry; late stream callbacks cannot repopulate a closed session.
+
+The protected detector now loads without a prompt in the background as the
+terminal opens. In the final local probe, `prewarm()` returned in 0.000392 s, cold
+loading finished in 69.799 s, and the following synthetic person/company extraction
+completed correctly in 1.117 s. Loading overlaps setup and typing; an immediate
+request still waits. Loading remains variable on this Mac. CPU mode still incurred GPU initialization
+and processed 4,000-character chunks more slowly, while the separately installed
+Ollama app 0.34.0 failed protected startup readiness. Neither was adopted.
+The working Ollama selection and network boundary are unchanged; owned resources
+were confirmed closed after the probes.
+
+An earlier generation-based warmup failed during the first live coding probe,
+blocking the request before any cloud call. Its cause was not established; a
+separate diagnostic succeeded. Warmup now uses Ollama's explicit promptless
+load-only operation and is advisory: a failed warmup permits a later actual
+local scan, which must still succeed and validate completely before forwarding.
+
+`--mask-effort` explicitly selects a reasoning budget supported by the installed
+Codex model. The installed synthetic subscription test verified `medium` in both
+the native request and the masked outgoing request. Omitting the option preserves
+the existing setting; model and service tier are unchanged.
+
+Selected project roots are automatically protected even outside the home
+directory, including explicit Codex project/additional roots and symlink spellings.
+Shared filesystem roots are excluded. A socket reset detected after scanning
+blocks forwarding; a valid write-half-closed client still receives its response.
+This does not guarantee cancellation for every disconnect or remove transport
+races. Disconnecting during response headers closes the owned upstream iterator.
+
+The complete suite ran **459 tests in 38.628 s: 457 passed and two optional local
+model tests skipped**, with both installed-client opt-ins enabled. Installed CLI
+tests use synthetic credentials and fixture providers. Separate real-model and
+live-provider evidence is recorded below.
+
+The 0.8.0 wheel built offline with existing setuptools. All 25 source modules,
+the browser companion, command entry points and complete license/review files
+were present; new modules imported and its CLI reported MaskCode 0.8.0. The
+disposable build workspace was removed and no dependencies were fetched.
+
+### Real local detection in the coding loop
+
+The optional installed-Codex fixture also passed with actual protected Qwen,
+dummy credentials, and a local fixture provider. The agent read a file, applied
+a patch, ran unittest successfully, and completed its final answer. Qwen detected
+the unconfigured full person name in the read result; requests 2–4 contained its
+issued placeholder and excluded the original. Exact name/email values were
+preserved in the final file. All four requests forwarded without a gateway or
+scanner block; one extraction repair succeeded. This cold run took **44.889 s**,
+with 11 scanned chunks and 15 cache hits; the final scan took 2.637 s. Owned
+processes and temporary state were cleaned up. No cloud inference was used.
+
+### Live Astra coding task
+
+The actual installed Codex, existing official authentication, protected local Qwen,
+and `gpt-6-astra` at explicit `medium` effort completed a disposable synthetic
+file-edit task. Codex exited 0; `greet()` was corrected; the synthetic contact
+comment was preserved. Native JSON events confirmed execution of the exact
+requested unittest command with exit 0 and an OK result, followed by a final
+agent message. An independent test rerun passed too. All five
+forwarded request bodies excluded the original email and exact project root.
+There were zero local scan or gateway blocks; the last provider status was 200.
+
+Total cold elapsed time was **66.299 s**. Local scanning accounted for 42.127 s,
+with 13 newly scanned chunks and 22 cache hits across five requests. The final
+scan took 2.570 s, reusing seven of nine chunks. No validation repair was needed
+in this successful run. Owned client, gateway, and Ollama resources closed.
+This confirms a live task, not universal task compatibility or confidentiality.
+An earlier successful development run took 79.989 s. Cold loading varies, so
+these runs are not a controlled speedup benchmark.
+
+Earlier development probes did not complete: one failed before forwarding,
+another edited the fixture but later stopped with an unclassified gateway error,
+and a third stopped on a later local scan. The outside-home project-path gap
+observed during those probes is now covered by automatic path registration and
+regressions. All probes used synthetic data; no real confidential fixture was sent.
+
 ## 0.7.3 — Codex startup warning
 
 MaskCode now suppresses Codex's generic unstable-feature banner for its own
@@ -87,7 +221,7 @@ Claude Code 2.1.247, Codex 0.153.4, Ollama 0.11.10, and the already installed
 qwen2.5:1.5b model. Inference checks used synthetic contacts and disposable files.
 No model download or sign-in change was performed.
 
-## Current evidence
+### 0.7.0 check results
 
 | Check | Result |
 | --- | --- |
@@ -118,6 +252,7 @@ No model download or sign-in change was performed.
 ```sh
 MASKCODE_TEST_INSTALLED_ENGINE=1 MASKCODE_TEST_INSTALLED_CODEX=1 python3 -m unittest discover -s tests -q
 MASKCODE_TEST_LOCAL_OLLAMA=1 python3 -m unittest discover -s tests -p 'test_ollama_runtime.py' -q
+MASKCODE_TEST_LOCAL_OLLAMA=1 PYTHONPATH=tests python3 -m unittest test_codex_client.InstalledCodexLocalHybridTests -v
 maskcode gateway doctor
 ```
 
@@ -157,5 +292,6 @@ macOS sandbox-exec mechanism is deprecated and is not a hardened boundary agains
 OS-helper IPC or hostile same-user software. It does not protect other sessions.
 Codex reads outside the project remain available; its state/temp write exceptions
 are explicit. Plugins, media, hosted tools and many executable substitutions remain
-restricted. OpenAI responses are buffered. Neither full feature parity nor a legal
+restricted. Codex display text streams; its tool calls and completion wait for
+complete validation. Other OpenAI API streams remain buffered. Neither full feature parity nor a legal
 certification is claimed; see LEGAL_REVIEW.md for the personal-use scope.

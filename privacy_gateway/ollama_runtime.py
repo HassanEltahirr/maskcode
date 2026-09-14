@@ -130,6 +130,63 @@ class ManagedOllama:
         self._temporary_home = None
         self._lock = threading.Lock()
         self._closed = False
+        self._warmup_state_lock = threading.Lock()
+        self._warmup_status = "idle"
+        self._warmup_done = threading.Event()
+        self._warmup_done.set()
+        self._warmup_thread = None
+
+    @property
+    def warmup_status(self):
+        """Read startup state without waiting for model inference."""
+        with self._warmup_state_lock:
+            return self._warmup_status
+
+    def prewarm(self):
+        """Start loading without a prompt while the terminal is prepared.
+
+        The existing generation lock serializes this request with real scans.
+        No model, prompt, or compiler cache is persisted between sessions.
+        Warmup is optional: a failed preload does not bypass or replace the
+        fully validated local inference required by a later real scan.
+        """
+        with self._warmup_state_lock:
+            if self._closed or not self.network_isolation:
+                raise OllamaRuntimeError("The protected local scanner is not running.")
+            if self._warmup_status != "idle":
+                return self
+            self._warmup_status = "loading"
+            self._warmup_done.clear()
+            self._warmup_thread = threading.Thread(
+                target=self._prewarm, name="maskcode-local-warmup", daemon=True)
+            self._warmup_thread.start()
+        return self
+
+    def _prewarm(self):
+        try:
+            with self._lock:
+                if self._closed or not self.network_isolation:
+                    raise OllamaRuntimeError("The protected local scanner is not running.")
+                # Ollama's explicit load-only chat operation performs no token
+                # generation. Match real scan options to keep the same runner.
+                result = self._request("POST", "/api/chat", {
+                    "model": self.model, "messages": [], "stream": False,
+                    "keep_alive": -1,
+                    "options": {"temperature": 0, "seed": 0, "num_ctx": 8192, "num_predict": 2048},
+                })
+            if result.get("done") is not True or result.get("done_reason") != "load":
+                raise OllamaRuntimeError("The local scanner startup check failed.")
+            with self._warmup_state_lock:
+                if not self._closed:
+                    self._warmup_status = "ready"
+        except Exception:
+            # Keep only the fixed state: runtime/model exceptions may contain
+            # internal diagnostics and must not reach the terminal or a log.
+            with self._warmup_state_lock:
+                if not self._closed:
+                    self._warmup_status = "failed"
+        finally:
+            self._warmup_done.set()
 
     def start(self):
         if self._closed:
@@ -257,21 +314,35 @@ class ManagedOllama:
                 or isinstance(timeout, bool) or not isinstance(timeout, (int, float))
                 or not 1 <= timeout <= 300):
             raise OllamaRuntimeError("The local scanner request was invalid.")
+        deadline = time.monotonic() + timeout
+        if threading.current_thread() is not self._warmup_thread:
+            if not self._warmup_done.wait(timeout):
+                raise OllamaRuntimeError("The local scanner is still loading; no cloud request was sent.")
+        remaining = deadline - time.monotonic()
+        if self._closed or not self.network_isolation:
+            raise OllamaRuntimeError("The protected local scanner is not running.")
+        if remaining <= 0:
+            raise OllamaRuntimeError("The local scanner did not respond; no cloud request was sent.")
         # Limit concurrency and cache to a single small model on modest Macs.
         with self._lock:
+            if self._closed or not self.network_isolation:
+                raise OllamaRuntimeError("The protected local scanner is not running.")
             result = self._request("POST", "/api/chat", {
                 "model": self.model, "messages": messages, "format": schema,
                 # Keep the owned detector loaded until MaskCode closes its
                 # process. An idle chat must not repeat costly Metal startup.
                 "stream": False, "keep_alive": -1,
                 "options": {"temperature": 0, "seed": 0, "num_ctx": 8192, "num_predict": 2048},
-            }, timeout=timeout)
+            }, timeout=remaining)
         try:
             if result.get("done") is not True or result.get("done_reason") == "length":
                 raise ValueError
             parsed = json.loads(result["message"]["content"])
             if not isinstance(parsed, dict):
                 raise ValueError
+            with self._warmup_state_lock:
+                if not self._closed:
+                    self._warmup_status = "ready"
             return parsed
         except (KeyError, TypeError, ValueError):
             raise OllamaRuntimeError("The local scanner returned incomplete structured data.") from None
@@ -281,10 +352,14 @@ class ManagedOllama:
                           {"role": "user", "content": text}], schema, timeout=timeout)
 
     def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        self.network_isolation = False
+        with self._warmup_state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self.network_isolation = False
+            self._warmup_status = "closed"
+            # Wake scans waiting for warmup before terminating owned inference.
+            self._warmup_done.set()
         process, self._process = self._process, None
         if process is not None:
             # start_new_session creates this group's identity. Never find/kill

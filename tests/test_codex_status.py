@@ -38,8 +38,8 @@ class CodexStatusTests(unittest.TestCase):
         def launch(actual_server, actual_args):
             self.assertIs(actual_server, server)
             self.assertIs(actual_args, args)
-            self.assertIn("First local scan loads the detector", stderr.getvalue())
-            self.assertIn("Working timer includes masking", stderr.getvalue())
+            self.assertIn("Local privacy model warms in the background", stderr.getvalue())
+            self.assertIn("first request may wait", stderr.getvalue())
             self.assertNotIn("MaskCode local scan:", stderr.getvalue())
             scanner.snapshot.assert_not_called()
             stages.append("native-exit")
@@ -77,7 +77,7 @@ class CodexStatusTests(unittest.TestCase):
                         patch("privacy_gateway.native.self_test"), patch("sys.stderr", stderr):
                     self.assertEqual(native.run_codex(native.parse_native(["--mask-backend", "codex"])), 0)
                 self.assertNotIn("MaskCode local scan:", stderr.getvalue())
-                self.assertEqual("First local scan loads the detector" in stderr.getvalue(), enabled)
+                self.assertEqual("Local privacy model warms in the background" in stderr.getvalue(), enabled)
 
     def test_summary_failure_preserves_exit_code_and_launch_error_skips_summary(self):
         for launch_error in (False, True):

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import signal
 import tempfile
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -229,6 +230,119 @@ class LifecycleTests(unittest.TestCase):
                     local._verify_isolation("policy", {})
 
 
+class WarmupTests(unittest.TestCase):
+    def setUp(self):
+        self.runtime = local.ManagedOllama()
+        self.runtime.port = 12345
+        self.runtime.network_isolation = True
+        self.addCleanup(self.runtime.close)
+
+    def test_background_warmup_is_promptless_idempotent_and_precedes_user_scan(self):
+        started, release, user_done = (threading.Event() for _ in range(3))
+        calls, output = [], []
+
+        def request(method, path, payload, timeout=120):
+            calls.append(payload)
+            if len(calls) == 1:
+                started.set()
+                self.assertTrue(release.wait(3))
+                return {"done": True, "done_reason": "load"}
+            return {"done": True, "message": {"content": '{"entities":[]}'}}
+
+        def user_scan():
+            try:
+                output.append(self.runtime.generate_json("Extract", "Synthetic private fixture", {}))
+            finally:
+                user_done.set()
+
+        with patch.object(self.runtime, "_request", side_effect=request):
+            self.assertEqual(self.runtime.warmup_status, "idle")
+            self.assertIs(self.runtime.prewarm(), self.runtime)
+            self.assertTrue(started.wait(2))
+            self.assertEqual(self.runtime.warmup_status, "loading")
+            self.assertIs(self.runtime.prewarm(), self.runtime)
+            user = threading.Thread(target=user_scan)
+            user.start()
+            try:
+                self.assertFalse(user_done.wait(0.05))
+                self.assertEqual(len(calls), 1)
+                self.assertNotIn("Synthetic private fixture", json.dumps(calls[0]))
+                self.assertEqual(calls[0]["messages"], [])
+                self.assertNotIn("format", calls[0])
+                self.assertNotIn("tools", calls[0])
+            finally:
+                release.set()
+                user.join(3)
+                self.runtime._warmup_thread.join(3)
+            self.assertFalse(user.is_alive())
+        self.assertEqual(output, [{"entities": []}])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["options"], calls[1]["options"])
+        self.assertEqual(self.runtime.warmup_status, "ready")
+
+    def test_warmup_failure_does_not_prevent_a_fully_validated_real_scan(self):
+        response = {"done": True, "message": {"content": '{"entities":[]}'}}
+        with patch.object(self.runtime, "_request", side_effect=[OSError("Synthetic private diagnostic"), response]) as request:
+            self.runtime.prewarm()
+            self.assertTrue(self.runtime._warmup_done.wait(2))
+            self.assertEqual(self.runtime.warmup_status, "failed")
+            self.assertTrue(self.runtime.network_isolation)
+            result = self.runtime.generate_json("Extract", "Synthetic private fixture", {})
+            self.assertEqual(result, {"entities": []})
+            self.assertEqual(self.runtime.warmup_status, "ready")
+            self.assertEqual(request.call_count, 2)
+
+    def test_failed_warmup_never_allows_an_invalid_scan_response(self):
+        invalid = {"done": False, "message": {"content": '{"entities":[]}'}}
+        with patch.object(self.runtime, "_request", side_effect=[OSError("Synthetic private diagnostic"), invalid]) as request:
+            self.runtime.prewarm()
+            self.assertTrue(self.runtime._warmup_done.wait(2))
+            with self.assertRaises(local.OllamaRuntimeError) as failure:
+                self.runtime.generate_json("Extract", "Synthetic private fixture", {})
+            self.assertNotIn("Synthetic private", str(failure.exception))
+            self.assertEqual(request.call_count, 2)
+
+    def test_close_wakes_waiting_scan_and_cannot_be_reversed_by_warmup(self):
+        started, release, user_done = (threading.Event() for _ in range(3))
+        failures = []
+
+        def request(*args, **kwargs):
+            started.set()
+            release.wait(3)
+            return {"done": True, "done_reason": "load"}
+
+        def user_scan():
+            try:
+                self.runtime.generate_json("Extract", "Synthetic private fixture", {})
+            except local.OllamaRuntimeError:
+                failures.append(True)
+            finally:
+                user_done.set()
+
+        with patch.object(self.runtime, "_request", side_effect=request) as upstream:
+            self.runtime.prewarm()
+            self.assertTrue(started.wait(2))
+            user = threading.Thread(target=user_scan)
+            user.start()
+            try:
+                self.runtime.close()
+                self.assertTrue(user_done.wait(2))
+                self.assertEqual(failures, [True])
+            finally:
+                release.set()
+                user.join(3)
+                self.runtime._warmup_thread.join(3)
+            self.assertEqual(upstream.call_count, 1)
+        self.assertEqual(self.runtime.warmup_status, "closed")
+
+    def test_invalid_warmup_result_never_reports_ready(self):
+        response = {"done": True, "done_reason": "unload"}
+        with patch.object(self.runtime, "_request", return_value=response):
+            self.runtime.prewarm()
+            self.assertTrue(self.runtime._warmup_done.wait(2))
+        self.assertEqual(self.runtime.warmup_status, "failed")
+
+
 @unittest.skipUnless(os.environ.get("MASKCODE_TEST_LOCAL_OLLAMA") == "1",
                      "Set MASKCODE_TEST_LOCAL_OLLAMA=1 for installed-model inference")
 class InstalledOllamaTests(unittest.TestCase):
@@ -240,6 +354,9 @@ class InstalledOllamaTests(unittest.TestCase):
             self.assertTrue(runtime.network_isolation)
             process = runtime._process
             temporary_home = runtime._temporary_home.name
+            runtime.prewarm()
+            self.assertTrue(runtime._warmup_done.wait(120))
+            self.assertEqual(runtime.warmup_status, "ready")
             result = runtime.generate_json(
                 "Return the exact person name and company mentioned in the text.",
                 "Mira Zorvan is the CFO at Taldor Systems.", schema)

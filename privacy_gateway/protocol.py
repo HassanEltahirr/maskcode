@@ -2,8 +2,9 @@
 
 Only provider-origin, byte-equivalent opaque reasoning blocks may be replayed.
 The shared JSON boundary and buffered SSE fallback live here. Production
-Anthropic responses use the incremental text / validated-tool implementation
-in streaming.py; other provider streams remain buffered at most 32 MiB.
+Anthropic and Codex responses use incremental display text with validated-tool
+gates in streaming.py and codex_streaming.py. Other provider streams remain
+buffered at most 32 MiB.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -58,12 +60,17 @@ _STATE_REFERENCES = {"previous_response_id", "conversation", "container"}
 _EXECUTABLE_FIELDS = {"command", "cmd", "code", "script"}
 _EXECUTABLE_TOOLS = {"bash", "shell", "exec_command", "python", "python3",
                      "run_code", "execute_code", "run_python", "terminal"}
+_PUBLIC_ROLES = frozenset({"user", "assistant", "system", "developer"})
+_CODEX_MESSAGE_ID = re.compile(r"msg_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
+_CODEX_FUNCTION_OUTPUT_ID = re.compile(r"fco_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
+_CODEX_CUSTOM_OUTPUT_ID = re.compile(r"ctco_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 
 # Fixed public protocol/schema vocabulary is not a confidential entity merely
 # because a small local model labels it one. Explicit policies and deterministic
 # secret detection still apply to it and can block an incompatible request.
 # Unknown names, schema keys, and content remain eligible for local discovery.
-PUBLIC_PROTOCOL_TERMS = frozenset(_STRUCTURAL_KEYS | _IDENTITIES | _CONTENT_TYPES | _INPUT_TYPES | {
+PUBLIC_PROTOCOL_TERMS = frozenset(_STRUCTURAL_KEYS | _IDENTITIES | _CONTENT_TYPES | _INPUT_TYPES
+                                 | _PUBLIC_ROLES | _EXECUTABLE_TOOLS | {
     "function", "namespace", "custom", "grammar", "lark", "json_schema",
     "object", "string", "number", "integer", "boolean", "array", "null",
     "true", "false", "low", "medium", "high", "xhigh", "max", "minimal", "none", "auto", "any",
@@ -71,6 +78,7 @@ PUBLIC_PROTOCOL_TERMS = frozenset(_STRUCTURAL_KEYS | _IDENTITIES | _CONTENT_TYPE
     "format", "syntax", "definition", "strict", "enum", "default", "minimum", "maximum",
     "parallel_tool_calls", "reasoning", "effort", "store", "include", "verbosity",
     "application/json", "text/event-stream", "identity", "codex_cli_rs",
+    "apply_patch", "write_stdin",
 })
 
 
@@ -159,6 +167,9 @@ def sanitize_payload(payload: dict, redactor: Any, provider: str,
         raise PrivacyBlocked("Expected a JSON request object.")
     trusted = trusted_opaque or set()
     normalized = str(provider).lower()
+    codex = normalized == "codex"
+    if codex:
+        normalized = "openai"
     if normalized not in {"anthropic", "claude", "openai"}:
         raise PrivacyBlocked("Unsupported provider protocol.")
 
@@ -227,10 +238,25 @@ def sanitize_payload(payload: dict, redactor: Any, provider: str,
                         or block.get("type", "message") not in _INPUT_TYPES):
                     raise PrivacyBlocked("Unsupported input item is blocked.")
         result = {}
+        disposable_id = (codex and not data_context and len(path) == 2
+            and path[0] == "input" and isinstance(path[1], int)
+            and isinstance(value.get("id"), str)
+            and ((value.get("type", "message") == "message"
+                  and isinstance(value.get("role"), str) and value["role"] in _PUBLIC_ROLES
+                  and _CODEX_MESSAGE_ID.fullmatch(value["id"]) is not None)
+                 or (value.get("type") == "function_call_output"
+                     and _CODEX_FUNCTION_OUTPUT_ID.fullmatch(value["id"]) is not None)
+                 or (value.get("type") == "custom_tool_call_output"
+                     and _CODEX_CUSTOM_OUTPUT_ID.fullmatch(value["id"]) is not None)))
         for key, child in value.items():
             if not isinstance(key, str):
                 raise PrivacyBlocked("Expected string JSON keys.")
             if not path and key in _DROP_TOP_LEVEL:
+                continue
+            # Native Codex assigns optional UUIDv7 IDs to messages/tool outputs.
+            # Drop only those known client bookkeeping fields, before discovery. Tool
+            # correlation IDs, provider message IDs and opaque items remain.
+            if key == "id" and disposable_id:
                 continue
             if key in _OPAQUE_KEYS and child not in (None, ""):
                 raise PrivacyBlocked("Unverified opaque data is blocked.")

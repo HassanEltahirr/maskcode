@@ -40,6 +40,7 @@ MaskCode options:
   --mask-local-model NAME  Choose the installed Ollama privacy model
   --mask-rules-only     Explicitly disable local AI detection; keep masking rules
   --mask-backend codex  Run the installed Codex terminal through the same masking
+  --mask-effort LEVEL  Codex reasoning effort; medium balances speed and depth
 
 Use -- to stop parsing MaskCode options. --help shows Claude's native help.
 Gateway utilities: maskcode gateway serve|preview|doctor|demo
@@ -52,12 +53,13 @@ The launcher restricts direct network access and disables custom integrations.
 
 def parse_native(argv):
     options = SimpleNamespace(action="claude", provider="anthropic", backend="claude", mode="auto",
-                              local_model="qwen2.5:1.5b",
+                              local_model="qwen2.5:1.5b", reasoning_effort=None,
                               policy=None, cwd=Path.cwd(), port=0, dashboard=False,
                               mask_help=False, mask_version=False, native_ui=False, no_browser=False, args=[])
     values = {"--mask-policy": "policy", "--mask-cwd": "cwd", "--mask-port": "port",
               "--mask-local-model": "local_model",
               "--mask-backend": "backend",
+              "--mask-effort": "reasoning_effort",
               # Compatibility for the initially installed MaskCode commands.
               "--policy": "policy", "--cwd": "cwd", "--port": "port", "--mode": "mode"}
     index = 0
@@ -89,6 +91,8 @@ def parse_native(argv):
                 raise ValueError("The masking mode must be review or auto")
             elif field == "backend" and value not in ("claude", "codex"):
                 raise ValueError("The MaskCode backend must be claude or codex")
+            elif field == "reasoning_effort" and value not in ("low", "medium", "high", "xhigh", "max", "ultra"):
+                raise ValueError("Choose a Codex effort: low, medium, high, xhigh, max, or ultra")
             setattr(options, field, value)
         elif arg == "--mask-review":
             options.mode = "review"
@@ -113,6 +117,8 @@ def parse_native(argv):
         index += 1
     if options.backend == "codex":
         options.action = options.provider = "codex"
+    elif options.reasoning_effort is not None:
+        raise ValueError("--mask-effort requires --mask-backend codex")
     return options
 
 
@@ -148,7 +154,7 @@ def run_codex(args):
         print("MaskCode · " + privacy + " · powered by the installed Codex terminal", file=sys.stderr)
         print("MaskCode enforces the outer sandbox: selected project/state/temp writes; network only through the masking gateway.", file=sys.stderr)
         if scanner is not None:
-            print("First local scan loads the detector; Codex’s Working timer includes masking and the buffered cloud reply.",
+            print("Local privacy model warms in the background; your first request may wait for it.",
                   file=sys.stderr, flush=True)
         if args.mode == "review" or args.dashboard:
             print("MaskCode local review: " + server.console_url, file=sys.stderr, flush=True)

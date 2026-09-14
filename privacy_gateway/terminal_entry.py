@@ -28,6 +28,7 @@ Privacy options:
   --mask-local-model NAME  Installed Ollama privacy model (qwen2.5:1.5b by default)
   --mask-rules-only     Explicitly use masking rules without local AI detection
   --mask-backend NAME   claude (MaskCode interface) or codex (native Codex interface)
+  --mask-effort LEVEL   Codex reasoning effort; medium balances speed and depth
   --mask-policy FILE    Protect local confidential terms and patterns
   --mask-cwd DIRECTORY  Start in this project directory
   --mask-review         Inspect and approve each outgoing model request

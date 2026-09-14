@@ -15,6 +15,7 @@ from typing import Any, Iterable, Iterator
 
 from .protocol import (MAX_SSE_BYTES, PrivacyBlocked, _Event,
                        _restore_tool_data, collect_trusted_opaque)
+from .provider_ids import ProviderIdRegistry, collect_event_ids
 
 
 _ERROR = "Malformed or incomplete provider event stream."
@@ -165,7 +166,9 @@ class AnthropicStream:
         self._text_trie = TextRestorer(redactor).trie
         self.maximum = maximum
         self.trusted_opaque: set[str] = set()
+        self.trusted_provider_ids = frozenset()
         self._candidate_trust: set[str] = set()
+        self._candidate_ids = ProviderIdRegistry()
         self._started = self._stopped = self._message_delta = False
         self._active = None
         self._index = -1
@@ -206,6 +209,8 @@ class AnthropicStream:
         restored = _restore_tool_data(arguments, self.redactor, block["name"])
         if not isinstance(restored, dict):
             raise PrivacyBlocked(_ERROR)
+        self._candidate_ids.remember(collect_event_ids(
+            {"type": "content_block_start", "content_block": block}, "anthropic"))
         encoded = json.dumps(restored, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         emitted = False
         for event in active["events"]:
@@ -333,5 +338,6 @@ class AnthropicStream:
         if not self._started or not self._stopped or self._active is not None:
             raise PrivacyBlocked(_ERROR)
         self.trusted_opaque = self._candidate_trust
+        self.trusted_provider_ids = self._candidate_ids.snapshot()
         yield from self._held
         self._held.clear()

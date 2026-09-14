@@ -220,11 +220,15 @@ def _settings(provider, base_url, catalog_path, model):
 
 
 @contextmanager
-def protected_codex_launch(server, arguments, *, cwd=None):
+def protected_codex_launch(server, arguments, *, cwd=None, reasoning_effort=None):
     """Yield (sandboxed argv, env); keep the temporary catalog until child exit."""
     extra, selected, exec_position = validate_codex_arguments(arguments)
+    if (reasoning_effort is not None and (not isinstance(reasoning_effort, str)
+            or reasoning_effort not in {"low", "medium", "high", "xhigh", "max", "ultra"})):
+        raise CodexConfigurationError("Invalid Codex reasoning effort")
     base_cwd = Path(cwd or Path.cwd()).expanduser().resolve(strict=True)
     effective_cwd = base_cwd
+    selected_path = Path(cwd or Path.cwd()).expanduser().absolute()
     additional = []
     index = 0
     while index < len(extra):
@@ -239,13 +243,15 @@ def protected_codex_launch(server, arguments, *, cwd=None):
             if name in ("--cd", "-C", "--add-dir"):
                 candidate = Path(value).expanduser()
                 if name in ("--cd", "-C"):
-                    effective_cwd = (candidate if candidate.is_absolute() else base_cwd / candidate).resolve(strict=True)
+                    selected_path = candidate if candidate.is_absolute() else base_cwd / candidate
+                    effective_cwd = selected_path.resolve(strict=True)
                     if not effective_cwd.is_dir():
                         raise CodexConfigurationError("A Codex workspace directory does not exist")
                 else:
                     additional.append(candidate)
         index += 1
-    additional = [(path if path.is_absolute() else effective_cwd / path).resolve(strict=True) for path in additional]
+    additional_paths = [path if path.is_absolute() else effective_cwd / path for path in additional]
+    additional = [path.resolve(strict=True) for path in additional_paths]
     if not effective_cwd.is_dir() or any(not path.is_dir() for path in additional):
         raise CodexConfigurationError("A Codex workspace directory does not exist")
     binary = find_codex_binary()
@@ -256,6 +262,16 @@ def protected_codex_launch(server, arguments, *, cwd=None):
     with tempfile.TemporaryDirectory(prefix="maskcode-codex-") as temporary:
         directory = Path(temporary)
         model = _read_bundled_model(binary, server.server_port, directory, selected)
+        if reasoning_effort is not None:
+            levels = model.get("supported_reasoning_levels")
+            if not isinstance(levels, list) or not any(
+                    isinstance(level, dict) and level.get("effort") == reasoning_effort for level in levels):
+                raise CodexConfigurationError("The selected Codex model does not support that reasoning effort")
+        from .project_paths import register_project_directories
+        try:
+            register_project_directories(server.state, [selected_path, *additional_paths])
+        except ValueError:
+            raise CodexConfigurationError("Codex project directories could not be protected before launch") from None
         base_instructions = model.get("base_instructions")
         if isinstance(base_instructions, str) and base_instructions:
             server.state.register_codex_instructions(selected, base_instructions)
@@ -266,7 +282,10 @@ def protected_codex_launch(server, arguments, *, cwd=None):
         # headers from a similarly named provider in existing user settings.
         provider = "maskcode_" + secrets.token_hex(8)
         argv = [binary]
-        for key, value in _settings(provider, server.proxy_url, path, selected).items():
+        settings = _settings(provider, server.proxy_url, path, selected)
+        if reasoning_effort is not None:
+            settings["model_reasoning_effort"] = reasoning_effort
+        for key, value in settings.items():
             argv.extend(["-c", key + "=" + json.dumps(value)])
         if exec_position is not None:
             # These official exec switches preserve auth while skipping user

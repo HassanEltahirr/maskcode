@@ -46,6 +46,18 @@ class NativeArgumentTests(unittest.TestCase):
         self.assertEqual(args.mode, "auto")
         self.assertFalse(args.dashboard)
         self.assertEqual(args.args, [])
+        self.assertIsNone(args.reasoning_effort)
+
+    def test_explicit_codex_effort_is_scoped_and_not_forwarded_as_a_raw_flag(self):
+        args = native.parse_native(["--mask-effort=medium", "--model", "gpt-6-astra",
+                                    "--mask-backend", "codex", "hello"])
+        self.assertEqual(args.reasoning_effort, "medium")
+        self.assertEqual(args.args, ["--model", "gpt-6-astra", "hello"])
+        for flags in (["--mask-effort", "medium"],
+                      ["--mask-backend", "codex", "--mask-effort", "medium;extra=true"],
+                      ["--mask-backend", "codex", "--mask-effort"]):
+            with self.subTest(flags=flags), self.assertRaises(ValueError):
+                native.parse_native(flags)
 
     def test_mask_options_are_removed_without_reordering_native_arguments(self):
         arguments = ["--model", "sonnet", "--mask-policy", "/synthetic/policy.json",

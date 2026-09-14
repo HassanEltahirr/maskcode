@@ -107,7 +107,8 @@ class SemanticScannerTests(unittest.TestCase):
                 scanner.scan(b"invalid source type")
             invalid = scanner.snapshot()
             self.assertEqual((invalid["current_chunks"], invalid["completed_chunks"], invalid["current_cache_hits"]), (0, 0, 0))
-            self.assertEqual(len(runtime.calls), 1)
+            self.assertEqual(len(runtime.calls), 2)
+            self.assertEqual(invalid["validation_retries"], 1)
             self.assertAlmostEqual(invalid["last_scan_seconds"], 1.5)
             self.assertAlmostEqual(invalid["total_scan_seconds"], 3.5)
 
@@ -150,7 +151,246 @@ class SemanticScannerTests(unittest.TestCase):
         self.assertEqual(len(runtime.calls), 2)
         scanner.scan(conversation + ["A later question"])
         self.assertEqual(len(runtime.calls), 3)
-        self.assertEqual(scanner.snapshot()["cache_hits"], 3)
+        self.assertEqual(scanner.snapshot()["cache_hits"], 4)
+
+    def test_prepended_short_source_preserves_complete_following_batch_layouts(self):
+        runtime = FakeRuntime()
+        scanner = SemanticScanner(runtime)
+        sources = [letter * 1900 for letter in "abcd"]
+        scanner.scan(sources)
+        original_inputs = [call[1] for call in runtime.calls]
+        self.assertEqual(len(original_inputs), 2)
+        prefix = "new instruction " * 20
+        scanner.scan([prefix, *sources])
+        self.assertEqual(len(runtime.calls), 3)
+        self.assertEqual(runtime.calls[-1][1], prefix)
+        self.assertEqual(scanner.snapshot()["current_cache_hits"], 2)
+        self.assertEqual(scanner.snapshot()["current_chunks"], 3)
+
+    def test_inserting_inside_batch_rescans_whole_batch_and_reuses_following_one(self):
+        runtime = FakeRuntime()
+        scanner = SemanticScanner(runtime)
+        sources = [letter * 1700 for letter in "abcd"]
+        scanner.scan(sources)
+        inserted = "fresh context"
+        scanner.scan([sources[0], inserted, *sources[1:]])
+        self.assertEqual(len(runtime.calls), 3)
+        self.assertEqual(runtime.calls[-1][1], semantic.SOURCE_BOUNDARY.join(
+            [sources[0], inserted, sources[1]]))
+        self.assertEqual(scanner.snapshot()["current_cache_hits"], 1)
+
+    def test_changed_neighbor_or_dictionary_path_cannot_reuse_part_of_a_batch(self):
+        runtime = FakeRuntime()
+        scanner = SemanticScanner(runtime)
+        first, second = "a" * 1700, "b" * 1700
+        scanner.scan([{"customer": first}, {"context": second}])
+        scanner.scan([{"month": first}, {"context": second}])
+        self.assertEqual(len(runtime.calls), 2)
+        scanner.scan([{"month": first}, {"context": second + " changed"}])
+        self.assertEqual(len(runtime.calls), 3)
+        self.assertEqual(scanner.snapshot()["current_cache_hits"], 0)
+        self.assertEqual(runtime.calls[-1][1], semantic.SOURCE_BOUNDARY.join([first, second + " changed"]))
+
+    def test_reordered_sources_within_a_cached_batch_require_a_new_scan(self):
+        runtime = FakeRuntime()
+        scanner = SemanticScanner(runtime)
+        scanner.scan(["first context", "second context"])
+        scanner.scan(["second context", "first context"])
+        self.assertEqual(len(runtime.calls), 2)
+        self.assertEqual(scanner.snapshot()["current_cache_hits"], 0)
+
+    def test_one_repair_uses_same_source_and_schema_then_reuses_its_validated_cache(self):
+        runtime = FakeRuntime()
+        def generate(text):
+            if len(runtime.calls) == 1:
+                return response(("invented private diagnostic", "PERSON"))
+            return response(("Alice", "PERSON")) if "Alice" in text else response()
+        runtime.handler = generate
+        scanner = SemanticScanner(runtime)
+        source = ["Customer Alice", "ordinary context"]
+        self.assertEqual(scanner.scan(source), [("Alice", "PERSON")])
+        self.assertEqual(len(runtime.calls), 2)
+        first, repaired = runtime.calls
+        self.assertEqual(first[1], repaired[1])
+        self.assertEqual(first[2], repaired[2])
+        self.assertEqual(repaired[0], first[0] + semantic.VALIDATION_REMINDER)
+        self.assertNotIn("invented private diagnostic", repaired[0] + repaired[1])
+        self.assertEqual(scanner.snapshot()["validation_retries"], 1)
+        self.assertEqual(scanner.snapshot()["repaired_chunks"], 1)
+        self.assertEqual(scanner.snapshot()["last_validation_reason"], "span_not_found")
+        self.assertEqual(scanner.scan(source), [("Alice", "PERSON")])
+        self.assertEqual(len(runtime.calls), 2)
+        self.assertEqual(scanner.scan(["new prefix", *source]), [("Alice", "PERSON")])
+        self.assertEqual(len(runtime.calls), 3)
+        self.assertEqual(runtime.calls[-1][1], "new prefix")
+        self.assertEqual(scanner.snapshot()["current_cache_hits"], 1)
+
+    def test_repaired_cache_retains_context_and_the_exact_repair_system(self):
+        runtime = FakeRuntime()
+        runtime.handler = lambda text: (response(("invented", "PERSON"))
+                                       if runtime.calls[-1][0] == semantic.SYSTEM_PROMPT
+                                       else response(("May", "PERSON")))
+        scanner = SemanticScanner(runtime)
+        scanner.scan([{"customer": "May"}])
+        scanner.scan([{}, {"customer": "May"}])
+        self.assertEqual(len(runtime.calls), 2)
+        scanner.scan([{"month": "May"}])
+        self.assertEqual(len(runtime.calls), 4)
+        with patch.object(semantic, "VALIDATION_REMINDER", semantic.VALIDATION_REMINDER + "\nAdditional fixed rule."):
+            scanner.scan([{"month": "May"}])
+        self.assertEqual(len(runtime.calls), 6)
+
+    def test_second_invalid_result_still_blocks_and_never_enters_the_cache(self):
+        runtime = FakeRuntime(lambda text: response(("invented private value", "PERSON")))
+        scanner = SemanticScanner(runtime)
+        with self.assertRaises(SemanticScanError):
+            scanner.scan("actual source")
+        self.assertEqual(len(runtime.calls), 2)
+        self.assertEqual(scanner.snapshot()["validation_retries"], 1)
+        self.assertEqual(scanner.snapshot()["repaired_chunks"], 0)
+        self.assertEqual(scanner.snapshot()["last_validation_reason"], "span_not_found")
+        self.assertEqual(scanner.snapshot()["cache_entries"], 0)
+        self.assertEqual(scanner._cache_layout_parts, 0)
+
+    def test_valid_first_pass_detection_survives_empty_repair_and_cache_reuse(self):
+        runtime = FakeRuntime()
+        runtime.handler = lambda text: (response(("Mira Zorvan", "PERSON"), ("invented", "PERSON"))
+                                       if len(runtime.calls) == 1 else response())
+        scanner = SemanticScanner(runtime)
+        for _ in range(2):
+            self.assertEqual(scanner.scan("Mira Zorvan is a customer."), [("Mira Zorvan", "PERSON")])
+        self.assertEqual(len(runtime.calls), 2)
+        self.assertEqual(scanner.snapshot()["repaired_chunks"], 1)
+
+    def test_partial_detections_never_escape_failed_or_overflowing_repairs(self):
+        for limit in (None, "MAX_ENTITIES_PER_CHUNK", "MAX_ENTITIES"):
+            with self.subTest(limit=limit):
+                runtime = FakeRuntime()
+                def generate(text):
+                    if len(runtime.calls) == 1:
+                        return response(("Alice", "PERSON"), ("invented", "PERSON"))
+                    return (response(("invented again", "PERSON")) if limit is None
+                            else response(("Bob", "PERSON"), ("Carol", "PERSON")))
+                runtime.handler = generate
+                scanner = SemanticScanner(runtime)
+                limits = {} if limit is None else {limit: 2}
+                with patch.multiple(semantic, **limits) if limits else patch.object(semantic, "MAX_ENTITIES", semantic.MAX_ENTITIES):
+                    with self.assertRaises(SemanticScanError):
+                        scanner.scan("Alice, Bob, and Carol are customers.")
+                self.assertEqual(len(runtime.calls), 2)
+                self.assertEqual(scanner.snapshot()["cache_entries"], 0)
+                self.assertEqual(scanner.snapshot()["repaired_chunks"], 0)
+
+    def test_extra_outer_metadata_cannot_erase_valid_initial_detections(self):
+        runtime = FakeRuntime()
+        runtime.handler = lambda text: ({**response(("Alice", "PERSON")), "extra": True}
+                                       if len(runtime.calls) == 1 else response())
+        self.assertEqual(SemanticScanner(runtime).scan("Alice is a customer."), [("Alice", "PERSON")])
+        self.assertEqual(len(runtime.calls), 2)
+
+    def test_oversized_initial_entity_list_blocks_without_repair_or_partial_retention(self):
+        for extra in ({}, {"extra": True}):
+            with self.subTest(extra=extra), patch.object(semantic, "MAX_ENTITIES_PER_CHUNK", 1):
+                runtime = FakeRuntime(lambda text: {**response(("Alice", "PERSON"), ("Bob", "PERSON")), **extra})
+                scanner = SemanticScanner(runtime)
+                with self.assertRaises(SemanticScanError):
+                    scanner.scan("Alice and Bob are customers.")
+                self.assertEqual(len(runtime.calls), 1)
+                self.assertEqual(scanner.snapshot()["validation_retries"], 0)
+                self.assertEqual(scanner.snapshot()["cache_entries"], 0)
+                self.assertEqual(scanner.snapshot()["last_validation_reason"], "entity_list")
+
+    def test_runtime_failures_and_nonobject_results_are_not_retried(self):
+        def failed(text):
+            raise TimeoutError("private runtime diagnostic")
+        for handler in (failed, lambda text: None, lambda text: [], lambda text: "malformed JSON"):
+            with self.subTest(handler=handler):
+                runtime = FakeRuntime(handler)
+                scanner = SemanticScanner(runtime)
+                with self.assertRaises(SemanticScanError):
+                    scanner.scan("actual source")
+                self.assertEqual(len(runtime.calls), 1)
+                self.assertEqual(scanner.snapshot()["validation_retries"], 0)
+                self.assertEqual(scanner.snapshot()["cache_entries"], 0)
+
+    def test_repair_runtime_failure_never_triggers_another_attempt(self):
+        runtime = FakeRuntime()
+        def generate(text):
+            if len(runtime.calls) == 1:
+                return response(("invented", "PERSON"))
+            raise TimeoutError("private runtime diagnostic")
+        runtime.handler = generate
+        scanner = SemanticScanner(runtime)
+        with self.assertRaises(SemanticScanError):
+            scanner.scan("actual source")
+        self.assertEqual(len(runtime.calls), 2)
+        self.assertEqual(scanner.snapshot()["cache_entries"], 0)
+
+    def test_layout_reuse_preserves_token_protection_after_neighbor_changes(self):
+        runtime = FakeRuntime(lambda text: response(("deadbeef", "IDENTIFIER"))
+                              if "hash: deadbeef" in text else response())
+        scanner = SemanticScanner(runtime)
+        tail = "x" * 1800
+        self.assertEqual(scanner.scan(["hash: deadbeef", tail]), [("deadbeef", "IDENTIFIER")])
+        self.assertEqual(scanner.scan(["PG_PERSON_deadbeef_0001", tail]), [])
+        self.assertEqual(len(runtime.calls), 2)
+        self.assertEqual(scanner.snapshot()["current_cache_hits"], 0)
+
+    def test_evicted_planned_batch_is_scanned_with_its_exact_prior_grouping(self):
+        with patch.object(semantic, "MAX_CACHE_ENTRIES", 1):
+            runtime = FakeRuntime()
+            scanner = SemanticScanner(runtime)
+            sources = ["a" * 1900, "b" * 1900]
+            scanner.scan(sources)
+            original_input = runtime.calls[0][1]
+            prefix = "new instruction " * 20
+            scanner.scan([prefix, *sources])
+            self.assertEqual(len(runtime.calls), 3)
+            self.assertEqual(runtime.calls[-2][1], prefix)
+            self.assertEqual(runtime.calls[-1][1], original_input)
+            self.assertEqual(scanner.snapshot()["current_cache_hits"], 0)
+
+    def test_layout_metadata_contains_only_hashes_and_shares_eviction_and_close(self):
+        with patch.object(semantic, "MAX_CACHE_LAYOUT_PARTS", 3):
+            runtime = FakeRuntime()
+            scanner = SemanticScanner(runtime)
+            scanner.scan(["private first", "private second"])
+            scanner.scan(["private third", "private fourth"])
+            self.assertEqual(scanner._cache_layout_parts, 2)
+            self.assertEqual(len(scanner._cache), 1)
+            for _, _, layout in scanner._cache.values():
+                self.assertTrue(all(type(signature) is bytes and len(signature) == 32 for signature in layout))
+            scanner.scan(["private first", "private second"])
+            self.assertEqual(len(runtime.calls), 3)
+            scanner.close()
+            self.assertEqual(scanner._cache_layout_parts, 0)
+            self.assertEqual(len(scanner._cache), 0)
+
+    def test_many_tiny_cached_layouts_fall_back_to_bounded_greedy_batches(self):
+        runtime = FakeRuntime()
+        scanner = SemanticScanner(runtime)
+        sources = [f"Synthetic fragment {index}" for index in range(129)]
+        for source in sources:
+            scanner.scan([source])
+        priming_calls = len(runtime.calls)
+        self.assertEqual(scanner.scan(sources), [])
+        self.assertEqual(scanner.snapshot()["current_chunks"], 2)
+        self.assertEqual(len(runtime.calls), priming_calls + 2)
+        self.assertEqual(scanner.scan(sources), [])
+        self.assertEqual(len(runtime.calls), priming_calls + 2)
+        self.assertEqual(scanner.snapshot()["current_cache_hits"], 2)
+
+    def test_layout_fallback_keeps_real_chunk_and_input_limits_before_inference(self):
+        runtime = FakeRuntime()
+        scanner = SemanticScanner(runtime)
+        scanner.scan(["cached seed"])
+        for limit, value, source in (
+                ("MAX_CHUNKS", 2, ["cached seed", "x" * 5000, "y" * 5000]),
+                ("MAX_INPUT_CHARS", 20, ["cached seed", "x" * 21])):
+            with self.subTest(limit=limit), patch.object(semantic, limit, value):
+                with self.assertRaises(SemanticScanError):
+                    scanner.scan(source)
+                self.assertEqual(len(runtime.calls), 1)
 
     def test_changed_source_context_and_changed_text_require_new_scans(self):
         runtime = FakeRuntime(lambda text: response(("May", "PERSON")))
@@ -161,6 +401,38 @@ class SemanticScannerTests(unittest.TestCase):
         scanner.scan({"month": "May"})
         scanner.scan({"month": "May arrived"})
         self.assertEqual(len(runtime.calls), 3)
+
+    def test_unchanged_batches_survive_history_insertion_removal_and_reordering(self):
+        runtime = FakeRuntime(lambda text: response(("Alice", "PERSON")) if "Alice" in text else response())
+        scanner = SemanticScanner(runtime)
+        first, second = "Alice " + "x" * 5000, "y" * 5000
+        self.assertEqual(scanner.scan([first, second]), [("Alice", "PERSON")])
+        original_calls = len(runtime.calls)
+        self.assertEqual(scanner.scan(["new prompt", first, second]), [("Alice", "PERSON")])
+        self.assertEqual(len(runtime.calls), original_calls + 1)
+        self.assertEqual(scanner.scan([second, first]), [("Alice", "PERSON")])
+        self.assertEqual(len(runtime.calls), original_calls + 1)
+        self.assertEqual(scanner.scan([first]), [("Alice", "PERSON")])
+        self.assertEqual(len(runtime.calls), original_calls + 1)
+
+    def test_moving_list_items_does_not_reuse_changed_context_or_text(self):
+        runtime = FakeRuntime()
+        scanner = SemanticScanner(runtime)
+        scanner.scan([{"customer": "May"}])
+        scanner.scan([{}, {"customer": "May"}])
+        self.assertEqual(len(runtime.calls), 1)
+        scanner.scan([{"month": "May"}])
+        scanner.scan([{"customer": "May arrived"}])
+        scanner.scan([[{"customer": "May"}]])
+        self.assertEqual(len(runtime.calls), 4)
+
+    def test_same_fragment_from_changed_long_source_is_rescanned(self):
+        runtime = FakeRuntime()
+        scanner = SemanticScanner(runtime)
+        scanner.scan(["x" * 5000])
+        original_calls = len(runtime.calls)
+        scanner.scan(["x" * 5000 + "new confidential context"])
+        self.assertEqual(len(runtime.calls), original_calls * 2)
 
     def test_chunk_boundary_overlap_preserves_complete_entity_and_deduplicates(self):
         entity = "Project Cedar Lake"
@@ -218,6 +490,52 @@ class SemanticScannerTests(unittest.TestCase):
         with self.assertRaises(SemanticScanError):
             SemanticScanner(runtime).scan(source)
         self.assertNotIn("PG_PERSON_deadbeef_0001", runtime.calls[0][1])
+
+    def test_detector_projection_blanks_split_tokens_without_changing_context_or_offsets(self):
+        token = "PG_PERSON_deadbeef_0001"
+        source = "x" * 3980 + token + "y" * 1000
+        projected = "x" * 3980 + " " * len(token) + "y" * 1000
+        runtime = FakeRuntime()
+        scanner = SemanticScanner(runtime)
+        scanner.scan(source)
+        self.assertEqual([call[1] for call in runtime.calls],
+                         [projected[:4000], projected[4000 - semantic.CHUNK_OVERLAP:]])
+        self.assertEqual(source[3980:3980 + len(token)], token)
+        self.assertTrue(all("deadbeef" not in call[1] and "PG_PERSON" not in call[1] for call in runtime.calls))
+
+    def test_identical_projection_from_different_tokens_keeps_distinct_source_cache_identity(self):
+        runtime = FakeRuntime()
+        scanner = SemanticScanner(runtime)
+        first = "Customer PG_PERSON_deadbeef_0001"
+        second = "Customer PG_PERSON_cafebabe_0001"
+        scanner.scan(first)
+        scanner.scan(second)
+        self.assertEqual(len(runtime.calls), 2)
+        self.assertEqual(runtime.calls[0][1], runtime.calls[1][1])
+        scanner.scan(first)
+        self.assertEqual(len(runtime.calls), 2)
+
+    def test_projection_keeps_nearby_real_names_and_batch_boundaries(self):
+        token = "PG_PERSON_deadbeef_0001"
+        source = ["Customer " + token, "Mira Zorvan is the reviewer."]
+        runtime = FakeRuntime(lambda text: response(("Mira Zorvan", "PERSON")))
+        self.assertEqual(SemanticScanner(runtime).scan(source), [("Mira Zorvan", "PERSON")])
+        self.assertEqual(runtime.calls[0][1], semantic.SOURCE_BOUNDARY.join(
+            ["Customer " + " " * len(token), source[1]]))
+        self.assertIn(token, source[0])
+
+    def test_projection_never_makes_protected_or_joined_spans_valid(self):
+        token = "PG_PERSON_deadbeef_0001"
+        for value, expected in (("deadbeef", "protected_span"), ("Alice Smith", "span_not_found")):
+            with self.subTest(value=value):
+                runtime = FakeRuntime(lambda text: response((value, "PERSON")))
+                scanner = SemanticScanner(runtime)
+                with self.assertRaises(SemanticScanError):
+                    scanner.scan("Alice" + token + "Smith")
+                self.assertEqual(len(runtime.calls), 2)
+                self.assertTrue(all(token not in call[1] for call in runtime.calls))
+                self.assertEqual(scanner.snapshot()["last_validation_reason"], expected)
+                self.assertEqual(scanner.snapshot()["cache_entries"], 0)
 
     def test_same_word_outside_a_token_remains_eligible(self):
         runtime = FakeRuntime(lambda text: response(("deadbeef", "IDENTIFIER")))
@@ -281,6 +599,7 @@ class SemanticScannerTests(unittest.TestCase):
             scanner.scan("Alice")
             self.assertEqual(len(runtime.calls), 2)
             self.assertEqual(scanner.snapshot()["cache_entries"], 0)
+            self.assertEqual(scanner._cache_layout_parts, 0)
 
     def test_close_cancels_inflight_scan_clears_cache_and_never_returns_partial_values(self):
         entered, release = threading.Event(), threading.Event()

@@ -20,6 +20,7 @@ from .redaction import Policy, Redactor
 from .protocol import (PrivacyBlocked, PUBLIC_PROTOCOL_TERMS, sanitize_payload, readable_fragments, restore_response, restore_sse,
                        collect_trusted_opaque, collect_sse_trusted_opaque)
 from .streaming import AnthropicStream
+from .provider_ids import ProviderIdRegistry, collect_response_ids, discovery_view
 
 CREDENTIAL_HEADERS = frozenset({"authorization", "x-api-key", "chatgpt-account-id"})
 
@@ -40,7 +41,7 @@ LIMITS = [
     "Rules, configured terms and enabled local AI detection mask recognized values; detection can miss sensitive content.",
     "Images, uploaded files, remote tools and unverified opaque history are blocked.",
     "Provider authentication still identifies your account. Original data remains in local client history and memory.",
-    "Anthropic text streams incrementally; tool calls wait for complete validation. Other providers remain buffered.",
+    "Anthropic and Codex display text streams incrementally; tool calls and successful completion wait for complete validation. Other OpenAI API responses remain buffered.",
     "The macOS launcher restricts direct network sockets; it is not a hardened boundary against a hostile local process or OS helper.",
 ]
 
@@ -89,6 +90,7 @@ class GatewayState:
         self._credential_fingerprint = None
         self.pending = {}
         self.trusted_opaque = set()
+        self.provider_ids = ProviderIdRegistry()
         self.lock = threading.RLock()
         self.requests = self.blocked = self.forwarded = 0
         self.network_isolation = False
@@ -144,7 +146,7 @@ class GatewayState:
             self._scan_started = True
             if self.closed:
                 raise PrivacyBlocked("Gateway session is closed")
-            clean = sanitize_payload(payload, self.redactor, self.protocol_provider, trusted)
+            clean = sanitize_payload(payload, self.redactor, self.provider, trusted)
             if self.semantic_scanner is not None:
                 from .semantic import SemanticScanError
                 try:
@@ -159,6 +161,8 @@ class GatewayState:
                         inspection = {key: value for key, value in clean.items() if key != "instructions"}
                         with self.lock:
                             self.public_instruction_chars_skipped += len(public[1])
+                    inspection = discovery_view(inspection, self.provider,
+                                                self.provider_ids.snapshot())
                     fragments = readable_fragments(inspection)
                     # Authentication and gateway-generated framing never enter
                     # the detector as anonymous user data. Client protocol
@@ -174,9 +178,9 @@ class GatewayState:
                     if self.closed:
                         raise PrivacyBlocked("Gateway session is closed")
                     self.redactor.protect_literals(entities)
-                    clean = sanitize_payload(payload, self.redactor, self.protocol_provider, trusted)
+                    clean = sanitize_payload(payload, self.redactor, self.provider, trusted)
                 except SemanticScanError:
-                    raise PrivacyBlocked("Local privacy scan did not complete safely. No cloud request was sent. Check /privacy and restart to retry.") from None
+                    raise PrivacyBlocked("Local privacy scan did not complete safely. No cloud request was sent. Try again; restart MaskCode if it keeps failing.") from None
             return clean
 
     def decision(self, request_id, decision):
@@ -232,6 +236,7 @@ class GatewayState:
     def close(self):
         with self.lock:
             self.closed = True
+            self.provider_ids.clear()
             for pending in self.pending.values():
                 pending.status = "denied"
                 pending.event.set()
@@ -252,8 +257,12 @@ class GatewayState:
             if response.getheader("Content-Encoding", "identity").lower() != "identity":
                 raise PrivacyBlocked("Compressed upstream response blocked")
             content_type = response.getheader("Content-Type", "")
-            if (self.provider == "anthropic" and 200 <= response.status < 300
-                    and content_type.split(";", 1)[0].strip().lower() == "text/event-stream"):
+            media_type = content_type.split(";", 1)[0].strip().lower()
+            codex_stream = (self.provider == "codex" and path == "/responses"
+                            and headers.get("Accept") == "text/event-stream"
+                            and media_type in {"", "text/event-stream"})
+            if (200 <= response.status < 300 and (codex_stream or
+                    (self.provider == "anthropic" and media_type == "text/event-stream"))):
                 streaming = True
                 return response.status, content_type, UpstreamChunks(conn, response)
             data = response.read(MAX_RESPONSE + 1)
@@ -347,21 +356,33 @@ class Handler(BaseHTTPRequestHandler):
 
     def respond_anthropic_stream(self, upstream):
         restorer = AnthropicStream(self.state.redactor, MAX_RESPONSE)
+        return self.respond_provider_stream(upstream, restorer)
+
+    def respond_codex_stream(self, upstream):
+        from .codex_streaming import CodexStream
+        return self.respond_provider_stream(upstream, CodexStream(self.state.redactor, MAX_RESPONSE))
+
+    def respond_provider_stream(self, upstream, restorer):
         chunks = [upstream] if isinstance(upstream, bytes) else upstream
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Connection", "close")
-        self.end_headers()
         self.close_connection = True
         try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
+            self.end_headers()
             for chunk in restorer.restore(chunks):
                 # Completion establishes provenance before releasing tool calls
                 # or message_stop, so an immediate follow-up can replay it.
                 if restorer.trusted_opaque:
                     with self.state.lock:
                         self.state.trusted_opaque.update(restorer.trusted_opaque)
+                identities = getattr(restorer, "trusted_provider_ids", ())
+                if identities:
+                    with self.state.lock:
+                        if not self.state.closed:
+                            self.state.provider_ids.remember(identities)
                 self.wfile.write(chunk)
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
@@ -388,6 +409,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def error(self, status, message):
         self.respond(status, {"type": "error", "error": {"type": "privacy_gateway_error", "message": message}})
+
+    def check_client_connection(self):
+        """Reject confirmed socket failures without mistaking a FIN for cancel.
+
+        A client can legitimately half-close its request side and still read
+        the response. EOF alone cannot distinguish that from abandonment.
+        """
+        try:
+            error = self.connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+        except OSError:
+            raise PrivacyBlocked("Client connection failed before forwarding; no cloud request was sent.") from None
+        if error:
+            raise PrivacyBlocked("Client connection failed before forwarding; no cloud request was sent.")
 
     def boundary_ok(self):
         port = self.server.server_port
@@ -533,16 +567,19 @@ class Handler(BaseHTTPRequestHandler):
             # A concurrent request may have discovered another protected value
             # while this exact preview awaited approval. Never send that stale
             # preview or silently replace it after the user approved it.
-            refreshed = sanitize_payload(clean, self.state.redactor, self.state.protocol_provider, trusted)
+            refreshed = sanitize_payload(clean, self.state.redactor, self.state.provider, trusted)
             if refreshed != clean:
                 raise PrivacyBlocked("New sensitive data was discovered while this request waited. The stale request was blocked; retry to create a new preview.")
             for name, value in forward_headers.items():
                 if name.lower() not in CREDENTIAL_HEADERS and self.state.redactor.redact_text(value) != value:
                     raise PrivacyBlocked("Protected value found in protocol header")
             with self.state.lock:
-                self.state.check_credentials(forward_headers, establish=True)
                 if self.state.closed:
                     raise PrivacyBlocked("Gateway session is closed")
+                # Only a confirmed connection failure is a safe cancellation
+                # signal. Do not reject a legitimate TCP write-side half-close.
+                self.check_client_connection()
+                self.state.check_credentials(forward_headers, establish=True)
                 self.state.forwarded += 1
             status, content_type, upstream = self.state.transport(
                 route + ("?beta=true" if pieces.query else ""), body, forward_headers)
@@ -555,15 +592,19 @@ class Handler(BaseHTTPRequestHandler):
         media_type = content_type.split(";", 1)[0].strip().lower()
         if (not media_type and self.state.provider == "codex" and route == "/responses"
                 and clean.get("stream") is True):
-            # Some Codex subscription responses omit Content-Type despite
-            # explicit SSE negotiation. Accept only a strictly validated,
-            # complete Responses stream in this exact case; never sniff HTML
-            # or override an explicit unsupported media type.
-            from .codex_stream import validate_codex_sse
-            validate_codex_sse(upstream)
+            # The incremental Codex restorer validates strict SSE framing and
+            # gates every tool and completion on clean EOF. This fallback is
+            # restricted to absent MIME on an expected Codex Responses stream.
             media_type = "text/event-stream"
         if media_type == "text/event-stream" and provider == "anthropic":
             return self.respond_anthropic_stream(upstream)
+        if (media_type == "text/event-stream" and self.state.provider == "codex"
+                and route == "/responses" and clean.get("stream") is True):
+            if isinstance(upstream, bytes):
+                # Retain pre-header rejection for already-buffered adapters.
+                from .codex_stream import validate_codex_sse
+                validate_codex_sse(upstream)
+            return self.respond_codex_stream(upstream)
         if media_type == "text/event-stream":
             trust = collect_sse_trusted_opaque(upstream, provider)
             restored = restore_sse(upstream, self.state.redactor, provider)
@@ -580,4 +621,6 @@ class Handler(BaseHTTPRequestHandler):
         restored = restore_response(parsed, self.state.redactor, provider)
         with self.state.lock:
             self.state.trusted_opaque.update(trust)
+            if not self.state.closed:
+                self.state.provider_ids.remember(collect_response_ids(parsed, provider))
         self.respond(status, restored)

@@ -129,22 +129,46 @@ maskcode --resume SESSION_ID
 maskcode --continue
 ```
 
+For quicker everyday Codex tasks, choose a smaller reasoning budget explicitly:
+
+```sh
+maskcode --mask-backend codex --model gpt-6-astra --mask-effort medium
+```
+
+`--mask-effort` is checked against the selected model's installed capabilities.
+Omit it to retain your existing reasoning setting, or choose `high`, `xhigh`,
+`max`, or `ultra` when supported for more reasoning. MaskCode does not change
+the model or request a paid priority tier to speed things up.
+
 The interface is inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 It is an independent MaskCode implementation, with no Hermes runtime bundled.
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for sources and license notices.
 The upstream Claude executable is not patched or renamed.
 
 MaskCode starts and stops its own protected Ollama process, reusing your installed
-model files. It leaves an existing Ollama service alone. The first scan loads the
-model and can take tens of seconds; unchanged scan chunks are cached in memory.
+model files. It leaves an existing Ollama service alone. Loading starts in the
+background while the terminal opens and you compose your task. It can still take
+tens of seconds on a cold start; an early first request waits for loading to finish.
+Warmup uses Ollama's promptless load operation. If it fails, a later real local
+scan can try loading; that scan still has to pass before forwarding anything.
+Unchanged scan chunks are cached in memory.
+Inserting or moving conversation items no longer invalidates an identical cached
+batch just because its list position changed. Changed text, source context, and
+batch contents still require a scan. Previously validated short batches also stay
+reusable when new text is inserted before them.
 Once loaded, the detector stays resident for the MaskCode session instead of
 unloading after an idle timeout. This keeps its model memory allocated until you
 exit MaskCode; the owned process still stops on normal exit.
-The Claude interface shows local scanning progress. Native Codex shows its own
-Working timer across local masking and the buffered cloud reply; it has no live
-MaskCode progress callback. Its launcher explains this before startup and prints
-numeric local-scan timing after Codex exits. A failed or invalid local scan blocks
-that request, with no automatic cloud fallback. Choose another installed detector
+The Claude interface shows model-loading and local scanning progress. Native
+Codex shows its own Working timer during masking, then streams available reply
+text; its launcher prints numeric local-scan timing after Codex exits.
+An invalid detector extraction gets one local retry on the same input
+with stricter extraction instructions. The retry must pass the same validation;
+timeouts, runtime errors, and a second invalid result block the request. There is
+no automatic cloud fallback. Valid detections from the first attempt are retained
+after a successful repair. Already masked placeholder characters are blanked only
+in the local detector's view, so it can focus on the remaining text; the cloud
+request keeps its stable placeholders. Choose another installed detector
 with `--mask-local-model NAME`; `--mask-rules-only` explicitly disables AI detection.
 It does not download models automatically.
 
@@ -155,15 +179,23 @@ on it; edited instructions, prompts, files, tool definitions/results, and nested
 copies continue through detection. This avoids repeatedly classifying the same
 public instructions. It does not remove the initial model load or cloud latency.
 
+The gateway also remembers bounded hashes of identifiers and Codex tool calls
+from fully validated provider replies. Exact tool-call history can skip repeated
+local AI classification because the provider already supplied it. Changed tool
+arguments and local tool results are scanned; deterministic masking still checks
+the complete outgoing request. This avoids treating protocol IDs and replayed
+token-limit settings as newly discovered confidential data.
+
 Normal exit, SIGTERM and terminal hangup clean up owned processes. SIGKILL or an
 interpreter crash can prevent cleanup; the gateway does not claim crash-proof
 process or memory erasure.
 
-On 2026-09-13, Astra passed one live synthetic echo round trip with exact local
-restoration. The Fable 5.1 live check did not pass: the provider returned HTTP 429.
-The current read/edit/test integration checks use fixture providers; the Astra
-echo is not a live coding-loop result. See [VALIDATION.md](VALIDATION.md) for the
-exact evidence. MaskCode cannot remove account limits or guarantee model access;
+Version 0.8.0 completed a live synthetic Astra file-edit task with local Qwen:
+the agent ran the unittest successfully, an independent rerun passed, and all five
+outgoing requests excluded the original email and project path. It took about
+66 seconds from a cold start on the tested M1 Mac. The Fable 5.1 live check
+remains unpassed after an earlier HTTP 429. See [VALIDATION.md](VALIDATION.md) for
+the exact evidence. MaskCode cannot remove account limits or guarantee model access;
 provider errors remain visible. The Claude launcher disables automatic retry loops.
 
 ## Terminal controls
@@ -201,6 +233,7 @@ approval dialogs close and the composer keeps your draft for recovery.
 | `--mask-local-model NAME` | Choose the installed Ollama detector; default `qwen2.5:1.5b` |
 | `--mask-rules-only` | Explicitly disable local AI detection and keep masking rules |
 | `--mask-backend claude\|codex` | Claude uses MaskCode's interface; Codex uses its native interface |
+| `--mask-effort LEVEL` | Explicit Codex reasoning budget, checked against the installed model |
 | `--mask-cwd DIRECTORY` | Choose the project directory |
 | `--mask-review` | Inspect and approve each outgoing model request |
 | `--mask-auto` | Mask and forward in the background (default) |
@@ -292,7 +325,9 @@ values. Explicit policy remains useful for terms the detector misses.
 Built-ins cover email addresses, international/UAE phone patterns, Emirates IDs,
 selected API keys, private keys, credential fields, IPv4 addresses excluding
 loopback by default, and Luhn-valid cards. The launcher adds your home-directory
-path. Sensitive numeric fields are blocked rather than changing JSON types.
+and selected project paths, including Codex `--cd` and `--add-dir` roots and their
+symlink spellings. Shared filesystem roots are excluded from literal masking.
+Sensitive numeric fields are blocked rather than changing JSON types.
 Residual checks reject known protected data left after masking. Duplicate JSON
 keys, nonfinite values and ambiguous key substitutions fail closed.
 
@@ -350,7 +385,7 @@ Files / prompt → official agent → rules → local Ollama span detection
 - `sandbox-exec` is deprecated. It does not provide a hardened filesystem or
   OS-helper IPC boundary against hostile same-user software, and it does not
   protect other desktop/browser/terminal sessions.
-- Anthropic text streams incrementally. Tool blocks and following events wait
+- Claude and Codex display text streams incrementally. Tool blocks and following events wait
   for complete validation and clean upstream EOF. Interrupted streams may leave
   partial display text, but do not release partial tools or successful completion.
 - Structured file paths and file contents can be restored. Shell substitutions
@@ -387,10 +422,12 @@ settings are removed when the client exits; saved user configuration is unchange
 The Codex path currently displays the native Codex terminal. MaskCode's own Hermes-
 inspired interface and its slash commands are for the Claude backend. Codex uses
 standard Responses function/patch tools, with hosted tools, plugins, hooks and
-alternate transports disabled. OpenAI responses are buffered before restoration.
-If the Codex subscription endpoint omits its response MIME header, MaskCode
-requires a complete, strictly validated Responses event stream before releasing
-it. Explicit unsupported content types remain blocked.
+alternate transports disabled. Codex display text is restored as it streams,
+including text following opaque reasoning. Tool events, all following events,
+and successful completion wait for complete validation and clean upstream EOF.
+The same boundary applies when the Codex subscription endpoint omits its response
+MIME header. Explicit unsupported content types remain blocked. Other OpenAI API
+streams still use the buffered restoration path.
 See validation for the exact tested provider coverage.
 
 On macOS, Codex uses one outer MaskCode sandbox because nested native sandboxes

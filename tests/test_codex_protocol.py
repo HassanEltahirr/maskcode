@@ -4,7 +4,8 @@ import json
 import shlex
 import unittest
 
-from privacy_gateway.protocol import PrivacyBlocked, restore_response, restore_sse, sanitize_payload
+from privacy_gateway.protocol import (PrivacyBlocked, collect_trusted_opaque, readable_fragments,
+                                      restore_response, restore_sse, sanitize_payload)
 from privacy_gateway.redaction import Policy, Redactor
 
 
@@ -22,6 +23,162 @@ def events(data):
 def custom_tool():
     return {"type": "custom", "name": "apply_patch", "description": "Edit workspace files",
             "format": {"type": "grammar", "syntax": "lark", "definition": "start: /[\\s\\S]+/"}}
+
+
+class CodexMetadataTests(unittest.TestCase):
+    # Deliberately fabricated native client UUIDv7; not a provider-issued ID.
+    native_id = "msg_11111111-2222-7333-8444-555555555555"
+
+    def setUp(self):
+        self.redactor = Redactor(Policy.from_dict({}))
+
+    def message(self, **changes):
+        return {"type": "message", "id": self.native_id, "role": "user",
+                "content": [{"type": "input_text", "text": "Synthetic task"}], **changes}
+
+    def test_codex_drops_only_optional_direct_client_message_ids(self):
+        records = []
+        for role in ("user", "assistant", "system", "developer"):
+            records.append(self.message(role=role))
+            without_type = self.message(role=role)
+            without_type.pop("type")
+            records.append(without_type)
+        payload = {"model": "test-model", "input": records}
+        before = copy.deepcopy(payload)
+        clean = sanitize_payload(payload, self.redactor, "codex")
+        expected = copy.deepcopy(payload)
+        for record in expected["input"]:
+            del record["id"]
+        self.assertEqual(clean, expected)
+        self.assertEqual(payload, before)
+        self.assertNotIn(self.native_id, readable_fragments(clean))
+
+    def test_message_id_text_is_still_masked_after_bookkeeping_field_is_dropped(self):
+        redactor = Redactor(Policy.from_dict({"literals": [{"value": self.native_id, "label": "IDENTIFIER"}]}))
+        payload = {"input": [self.message(content=self.native_id)]}
+        clean = sanitize_payload(payload, redactor, "codex")
+        self.assertNotIn("id", clean["input"][0])
+        self.assertNotEqual(clean["input"][0]["content"], self.native_id)
+        self.assertEqual(redactor.restore_text(clean["input"][0]["content"]), self.native_id)
+
+    def test_codex_drops_only_native_function_output_id_and_preserves_call_and_output(self):
+        identity = self.native_id.replace("msg_", "fco_", 1)
+        item = {"type": "function_call_output", "id": identity,
+                "call_id": "call_synthetic", "output": "Synthetic result", "status": "completed"}
+        payload = {"input": [item]}
+        before = copy.deepcopy(payload)
+        clean = sanitize_payload(payload, self.redactor, "codex")
+        self.assertEqual(clean, {"input": [{key: value for key, value in item.items() if key != "id"}]})
+        self.assertEqual(payload, before)
+        self.assertNotIn(identity, readable_fragments(clean))
+        protected = Redactor(Policy.from_dict({"literals": [{"value": identity, "label": "IDENTIFIER"}]}))
+        clean = sanitize_payload({"input": [{**item, "output": identity}]}, protected, "codex")
+        self.assertNotEqual(clean["input"][0]["output"], identity)
+        self.assertEqual(protected.restore_text(clean["input"][0]["output"]), identity)
+        with self.assertRaises(PrivacyBlocked):
+            sanitize_payload({"input": [{**item, "call_id": identity}]}, protected, "codex")
+
+    def test_function_output_id_drop_does_not_expand_to_other_slots_or_unknown_ids(self):
+        identity = self.native_id.replace("msg_", "fco_", 1)
+        item = {"type": "function_call_output", "id": identity,
+                "call_id": "call_synthetic", "output": "Synthetic result"}
+        for provider in ("openai", "anthropic"):
+            self.assertEqual(sanitize_payload({"input": [item]}, self.redactor, provider), {"input": [item]})
+        for changed in (identity.replace("7333", "4333"), identity + "x", "fco_synthetic", self.native_id):
+            payload = {"input": [{**item, "id": changed}]}
+            self.assertEqual(sanitize_payload(payload, self.redactor, "codex"), payload)
+        payloads = [{"input": [{**item, "type": "custom_tool_call_output"}]},
+                    {"input": [self.message(id=identity)]},
+                    {"extra_context": {"input": [item]}},
+                    {"input": [self.message(extra_context=item)]}]
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                clean = sanitize_payload(payload, self.redactor, "codex")
+                self.assertIn(identity, readable_fragments(clean))
+
+    def test_codex_custom_output_id_requires_exact_prefix_type_and_direct_slot(self):
+        identity = self.native_id.replace("msg_", "ctco_", 1)
+        item = {"type": "custom_tool_call_output", "id": identity,
+                "call_id": "call_synthetic", "output": "Synthetic patch result"}
+        clean = sanitize_payload({"input": [item]}, self.redactor, "codex")
+        self.assertEqual(clean, {"input": [{key: value for key, value in item.items() if key != "id"}]})
+        self.assertEqual(item["id"], identity)
+        for payload in ({"extra_context": {"input": [item]}},
+                        {"input": [{**item, "type": "function_call_output"}]},
+                        {"input": [{**item, "id": "ctco_synthetic"}]},
+                        {"input": [{**item, "id": identity.replace("7333", "4333")}]},
+                        {"input": [{**item, "id": identity + "x"}]}):
+            self.assertEqual(sanitize_payload(payload, self.redactor, "codex"), payload)
+        for provider in ("openai", "anthropic"):
+            self.assertEqual(sanitize_payload({"input": [item]}, self.redactor, provider), {"input": [item]})
+        protected = Redactor(Policy.from_dict({"literals": [{"value": identity, "label": "IDENTIFIER"}]}))
+        clean = sanitize_payload({"input": [{**item, "output": identity}]}, protected, "codex")
+        self.assertNotEqual(clean["input"][0]["output"], identity)
+        self.assertEqual(protected.restore_text(clean["input"][0]["output"]), identity)
+        with self.assertRaises(PrivacyBlocked):
+            sanitize_payload({"input": [{**item, "call_id": identity}]}, protected, "codex")
+
+    def test_non_codex_provider_keeps_and_checks_the_same_id(self):
+        payload = {"input": [self.message()]}
+        protected = Redactor(Policy.from_dict({"literals": [{"value": self.native_id, "label": "IDENTIFIER"}]}))
+        for provider in ("openai", "anthropic", "claude"):
+            with self.subTest(provider=provider):
+                self.assertEqual(sanitize_payload(payload, self.redactor, provider), payload)
+                with self.assertRaises(PrivacyBlocked):
+                    sanitize_payload(payload, protected, provider)
+
+    def test_unknown_ids_or_roles_are_not_removed(self):
+        variants = [self.native_id.replace("7333", "4333"), self.native_id.replace("8444", "7444"),
+                    self.native_id.replace("11111111", "AAAAAAAA"), self.native_id + "x",
+                    "x" + self.native_id, self.native_id + "\n", "msg_synthetic", "msg_provider"]
+        for identity in variants:
+            with self.subTest(identity=identity):
+                payload = {"input": [self.message(id=identity)]}
+                self.assertEqual(sanitize_payload(payload, self.redactor, "codex"), payload)
+        for role in ("tool", "unknown", "USER", None):
+            with self.subTest(role=role):
+                payload = {"input": [self.message(role=role)]}
+                self.assertEqual(sanitize_payload(payload, self.redactor, "codex"), payload)
+
+    def test_nested_and_tool_identifiers_remain_and_are_checked(self):
+        tool = {"type": "function_call", "id": self.native_id, "call_id": "call_synthetic",
+                "name": "exec_command", "arguments": "{}"}
+        custom = {"type": "custom_tool_call", "id": self.native_id, "call_id": "call_synthetic",
+                  "name": "apply_patch", "input": ""}
+        payloads = [{"extra_context": {"input": [self.message()]}},
+                    {"input": [self.message(extra_context=self.message())]},
+                    {"input": [tool]}, {"input": [custom]},
+                    {"input": [self.message(call_id=self.native_id)]}]
+        protected = Redactor(Policy.from_dict({"literals": [{"value": self.native_id, "label": "IDENTIFIER"}]}))
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                clean = sanitize_payload(payload, self.redactor, "codex")
+                self.assertIn(self.native_id, readable_fragments(clean))
+                with self.assertRaises(PrivacyBlocked):
+                    sanitize_payload(payload, protected, "codex")
+
+    def test_trusted_opaque_identity_is_unchanged_and_untrusted_is_blocked(self):
+        opaque = {"type": "reasoning", "id": self.native_id, "encrypted_content": "synthetic-opaque", "summary": []}
+        payload = {"input": [opaque]}
+        trusted = collect_trusted_opaque({"output": [opaque]})
+        self.assertEqual(sanitize_payload(payload, self.redactor, "codex", trusted), payload)
+        with self.assertRaises(PrivacyBlocked):
+            sanitize_payload(payload, self.redactor, "codex")
+
+    def test_public_roles_and_builtin_tools_are_semantic_vocabulary_only(self):
+        terms = ["user", "assistant", "system", "developer", "bash", "shell", "exec_command",
+                 "python", "python3", "run_code", "execute_code", "run_python", "terminal",
+                 "apply_patch", "write_stdin"]
+        self.assertEqual(readable_fragments(terms), [])
+        private = ["custom_company_tool", "The user met Mira Zorvan", "Apply_patch", "USER"]
+        self.assertEqual(readable_fragments(private), private)
+        for term, payload in (("user", {"input": [self.message()]}),
+                              ("apply_patch", {"tools": [custom_tool()]}),
+                              ("exec_command", {"tools": [{"type": "function", "name": "exec_command"}]})):
+            with self.subTest(term=term):
+                protected = Redactor(Policy.from_dict({"literals": [{"value": term, "label": "SENSITIVE"}]}))
+                with self.assertRaises(PrivacyBlocked):
+                    sanitize_payload(payload, protected, "codex")
 
 
 class CodexProtocolTests(unittest.TestCase):

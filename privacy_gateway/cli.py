@@ -8,7 +8,6 @@ import subprocess
 import sys
 import threading
 import webbrowser
-from dataclasses import replace
 from pathlib import Path
 
 from . import __version__
@@ -51,8 +50,12 @@ def build_parser():
 
 
 def start_gateway(args):
+    from .project_paths import directory_literals, with_directory_literals
     configured = Policy.from_file(args.policy) if args.policy else Policy.from_dict({})
-    policy = replace(configured, literals=configured.literals + ((str(Path.home()), "LOCAL_HOME"),))
+    paths = directory_literals([Path.home()], "LOCAL_HOME")
+    if getattr(args, "cwd", None) is not None:
+        paths.extend(directory_literals([args.cwd]))
+    policy = with_directory_literals(configured, paths)
     provider = getattr(args, "provider", "anthropic" if args.action == "claude" else "codex")
     runtime = scanner = state = server = None
     try:
@@ -60,6 +63,7 @@ def start_gateway(args):
             from .ollama_runtime import ManagedOllama
             from .semantic import SemanticScanner
             runtime = ManagedOllama(model=args.local_model).start()
+            runtime.prewarm()
             scanner = SemanticScanner(runtime)
         state = GatewayState(provider, policy, args.mode, semantic_scanner=scanner, local_runtime=runtime)
         server = GatewayServer(state, args.port)
@@ -101,7 +105,8 @@ def launch_claude(server, args):
 def launch_codex(server, args):
     from .codex_client import protected_codex_launch
     extra = args.args[1:] if args.args[:1] == ["--"] else args.args
-    with protected_codex_launch(server, extra, cwd=args.cwd) as (argv, env):
+    with protected_codex_launch(server, extra, cwd=args.cwd,
+                                reasoning_effort=getattr(args, "reasoning_effort", None)) as (argv, env):
         return subprocess.call(argv, cwd=args.cwd, env=env)
 
 
