@@ -36,7 +36,8 @@ _CREDENTIAL_NAME = (
     r"(?:password|passwd|pwd|secret|client[_-]?secret|api[_-]?key|"
     r"secret[_-]?(?:access[_-]?)?key|access[_-]?key|"
     r"access[_-]?token|refresh[_-]?token|session[_-]?token|auth[_-]?token|token|"
-    r"private[_-]?key|authorization|credential)s?"
+    r"private[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|"
+    r"authorization|credential)s?"
 )
 _CREDENTIAL_KEY = re.compile(_CREDENTIAL_NAME + r"\Z", re.IGNORECASE)
 # Conventional count/limit keys are not credential values. Their numeric values
@@ -84,9 +85,21 @@ _BUILTINS: tuple[tuple[str, Pattern[str]], ...] = (
         r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
         r"xox[baprs]-[A-Za-z0-9-]{12,}|"
         r"AIza[A-Za-z0-9_-]{30,}|"
-        r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+        r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
+        r"glpat-[A-Za-z0-9_-]{20,}|gl(?:dt|rt|ptt|soat|cbt)-[A-Za-z0-9_-]{20,}|"
+        r"hf_[A-Za-z0-9]{30,}|npm_[A-Za-z0-9]{36}|pypi-AgE[A-Za-z0-9_-]{50,}|"
+        r"ya29\.[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{20,}|"
+        r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}|"
+        r"shp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}|dop_v1_[a-f0-9]{64}|"
+        r"xapp-[0-9]-[A-Za-z0-9-]{20,}"
         r")(?![\w-])"
     )),
+    ("SECRET", re.compile(
+        r"https://hooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]{16,}"
+        r"|https://[a-z0-9.-]+\.webhook\.office\.com/[^\s\"'<>]{20,}"
+        r"|https://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{20,}"
+    )),
+    ("IBAN", re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,4})?(?![A-Za-z0-9])")),
     ("CREDIT_CARD", re.compile(r"(?<!\w)\d(?:[ -]?\d){12,18}(?!\w)")),
 )
 _AUTH = re.compile(r"\bBearer\s+([A-Za-z0-9._~+/=-]{8,})", re.IGNORECASE)
@@ -259,6 +272,18 @@ def _encoding_variants(rule: LiteralRule) -> set[str]:
     return variants
 
 
+def _iban(value: str) -> bool:
+    """ISO 13616 length and mod-97 check; rejects ordinary uppercase words."""
+    compact = value.replace(" ", "")
+    if not 15 <= len(compact) <= 34 or not any(char.isdigit() for char in compact[4:]):
+        return False
+    rearranged = compact[4:] + compact[:4]
+    try:
+        return int("".join(str(int(char, 36)) for char in rearranged)) % 97 == 1
+    except ValueError:
+        return False
+
+
 def _luhn(value: str) -> bool:
     digits = [int(char) for char in value if char.isdigit()]
     if not 13 <= len(digits) <= 19 or len(set(digits)) == 1:
@@ -398,6 +423,8 @@ class Redactor:
                 for match in pattern.finditer(value):
                     raw = match.group()
                     if label == "CREDIT_CARD" and not _luhn(raw):
+                        continue
+                    if label == "IBAN" and not _iban(raw):
                         continue
                     if label == "PHONE":
                         digits = re.sub(r"\D", "", raw)

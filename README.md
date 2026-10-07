@@ -333,12 +333,19 @@ keys, nonfinite values and ambiguous key substitutions fail closed.
 
 ```sh
 maskcode gateway demo
+maskcode gateway scan /path/to/project
 printf '%s\n' 'Contact demo@example.com' | maskcode gateway preview
 maskcode gateway preview --policy /path/to/private-policy.json < local-input.txt
 maskcode gateway doctor
 ```
 
 Preview is offline and rules-only; it does not run the Ollama detector.
+`gateway scan` audits files or directories before a session and lists, per file,
+which labels and line numbers would be masked. It never prints the matched values
+or placeholders, skips binary files, `.git`, virtualenvs and `node_modules`, and
+exits with status 1 when anything maskable is found, so it can gate CI or a
+pre-commit hook. Add `--json` for machine-readable output and `--policy` for your
+own terms. Like preview, it is rules-only.
 Avoid putting real secrets into shell arguments or history.
 The browser preview's extra terms apply only to that preview; save a policy file
 to apply terms to the actual coding session.

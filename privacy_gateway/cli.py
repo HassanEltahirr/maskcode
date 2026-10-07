@@ -36,6 +36,12 @@ def build_parser():
     preview = sub.add_parser("preview", help="Mask stdin locally without making a network request")
     preview.add_argument("--policy", type=Path)
     preview.add_argument("--json", action="store_true", help="Treat stdin as a JSON document")
+    scan = sub.add_parser("scan", help="Report which files/lines would be masked, offline, without printing values")
+    scan.add_argument("paths", nargs="+", type=Path, help="Files or directories to inspect")
+    scan.add_argument("--policy", type=Path)
+    scan.add_argument("--json", action="store_true", help="Machine-readable findings")
+    scan.add_argument("--max-bytes", type=int, default=2 * 1024 * 1024,
+                      help="Skip files larger than this many bytes (default: 2 MiB)")
     sub.add_parser("demo", help="Show a synthetic masking and restoration example offline")
     sub.add_parser("doctor", help="Check runtimes and macOS network restriction without reading credentials")
     serve = sub.add_parser("serve", help="Start local console and gateway (does not isolate existing clients)")
@@ -120,6 +126,12 @@ def gateway_main(argv):
             print(json.dumps({"original_synthetic": original, "provider_would_receive": masked,
                               "restored_locally": r.restore_text(masked), "redactions": r.counts()}, indent=2))
             return 0
+        if args.action == "scan":
+            from .scan import scan_paths, format_report
+            report = scan_paths(args.paths, Policy.from_file(args.policy) if args.policy else None,
+                                max_bytes=args.max_bytes)
+            print(json.dumps(report, indent=2) if args.json else format_report(report))
+            return 1 if report["findings"] else 0
         if args.action == "preview":
             r = Redactor(Policy.from_file(args.policy) if args.policy else None)
             content = sys.stdin.read(8 * 1024 * 1024 + 1)

@@ -1,5 +1,17 @@
 # MaskCode validation
 
+## 0.9.0 — broader built-ins and offline scan
+
+Added rules-only detectors for GitLab, Hugging Face, npm, PyPI, Google OAuth,
+SendGrid, Shopify, DigitalOcean and Slack app tokens; Slack, Teams and Discord
+webhook URLs; `AccountKey`/`SharedAccessKey` credential fields; and IBANs that
+pass the ISO 13616 mod-97 check (invalid checksums and ordinary uppercase words
+are left alone). `maskcode gateway scan` reports file, label and line numbers
+without values. `tests/test_builtins_extended.py` covers masking, exact
+restoration, IBAN false positives, value-free reports and exit codes with
+synthetic fixtures only. The existing redaction, security, server, protocol and
+semantic suites pass unchanged. CI now runs on Python 3.10, 3.12 and 3.13.
+
 ## 0.8.0 — streaming and response latency
 
 Codex now receives incrementally restored display text, including text after
