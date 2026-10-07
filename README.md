@@ -323,8 +323,11 @@ to the same memory-only mapping; it never rewrites source code or invents replac
 values. Explicit policy remains useful for terms the detector misses.
 
 Built-ins cover email addresses, international/UAE phone patterns, Emirates IDs,
-selected API keys, private keys, credential fields, IPv4 addresses excluding
-loopback by default, and Luhn-valid cards. The launcher adds your home-directory
+selected API keys (AWS, OpenAI, Anthropic, GitHub, GitLab, Slack, Stripe, Google,
+Hugging Face, npm, PyPI, SendGrid, Shopify, DigitalOcean, JWTs), Slack/Teams/Discord
+webhook URLs, private keys, credential fields (including `AccountKey` connection
+strings), IPv4 addresses excluding loopback by default, mod-97-valid IBANs, and
+Luhn-valid cards. The launcher adds your home-directory
 and selected project paths, including Codex `--cd` and `--add-dir` roots and their
 symlink spellings. Shared filesystem roots are excluded from literal masking.
 Sensitive numeric fields are blocked rather than changing JSON types.
