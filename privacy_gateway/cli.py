@@ -198,6 +198,9 @@ def main(argv=None):
         try:
             if raw[:1] == ["gateway"]:
                 result = gateway_main(raw[1:])
+            elif raw[:1] == ["app"]:
+                from .app import main as app_main
+                result = app_main(raw[1:])
             else:
                 from .terminal_entry import run
                 result = run(raw)

@@ -1,5 +1,20 @@
 # MaskCode validation
 
+## 1.0.0 — private chat app
+
+`maskcode app` (and the `Start MaskCode` launchers) opens a ChatGPT-style chat in
+the browser. Messages are masked on a loopback server, only masked history goes
+to the configured provider (OpenAI-compatible Chat Completions or Anthropic
+Messages, streamed), and replies are restored before display; partial
+placeholders are held back while streaming. Each message can show its masked
+version. `tests/test_chat.py` uses a local fake provider to assert the provider
+never receives configured words or emails, the reply is restored, follow-up
+history stays masked, keys are never returned to the browser, and plain HTTP is
+refused for remote hosts. `tests/test_app.py` covers loopback binding, the
+per-launch token, Host/Origin checks and word storage. Exercised end to end on
+Windows 11 against a live GPT model: multi-turn chat, restored replies, masked
+views, markdown rendering, and escaping of HTML in model output.
+
 ## 0.9.0 — broader built-ins and offline scan
 
 Added rules-only detectors for GitLab, Hugging Face, npm, PyPI, Google OAuth,

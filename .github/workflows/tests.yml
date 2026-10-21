@@ -30,3 +30,8 @@ jobs:
         run: maskcode --version
       - name: Offline scan of the repository examples
         run: maskcode gateway scan examples
+      - name: App starts and serves its page
+        run: |
+          maskcode app --no-browser --port 8765 &
+          sleep 2
+          curl -fsS -H "Host: 127.0.0.1:8765" http://127.0.0.1:8765/ | grep -q "Message MaskCode"

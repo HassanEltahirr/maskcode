@@ -42,7 +42,8 @@ Terminal: Enter sends · Alt+Enter/Ctrl+J adds a line · Tab completes commands
 Commands: /help · /about · /model · /clear · /privacy · /restart · /login · /quit
 
 --help and --version describe MaskCode. Use --mask-native --help for the engine.
-Gateway utilities: maskcode gateway serve|preview|doctor|demo
+Gateway utilities: maskcode gateway serve|preview|scan|doctor|demo
+Everyday app:      maskcode app   (protect text for any AI chat, in your browser)
 
 Hermes-inspired interface; installed Claude Code supplies the coding engine.
 Ollama finds sensitive spans locally; rules replace and restore exact values.

@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>MaskCode</title>
+<style>
+:root{
+  --bg:#ffffff; --side:#f7f7f8; --ink:#1f2328; --ink-2:#5d646d; --ink-3:#8b9198; --line:#e6e7ea;
+  --bubble:#f1f2f4; --acc:#1f7a55; --acc-soft:#e6f3ec; --tok:#e7effa; --tok-ink:#1d4f86; --bad:#b3261e;
+  --sans:"Segoe UI Variable Text","Segoe UI",-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+  --mono:"Cascadia Mono","SF Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+:root[data-theme=dark]{
+  --bg:#212121; --side:#171717; --ink:#ececec; --ink-2:#b4b4b4; --ink-3:#8e8e8e; --line:#333;
+  --bubble:#2f2f2f; --acc:#5fd1a0; --acc-soft:#1f3a2e; --tok:#1e3047; --tok-ink:#a9cdf5; --bad:#ff8a80;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font:15px/1.6 var(--sans);-webkit-font-smoothing:antialiased;display:flex;overflow:hidden}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:8px}
+aside{width:260px;flex:none;background:var(--side);display:flex;flex-direction:column;padding:10px;gap:4px;transition:margin .2s}
+body.noside aside{margin-left:-260px}
+.side-btn{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;padding:9px 10px;border-radius:9px;text-align:left;font-size:14px}
+.side-btn:hover{background:rgba(127,127,127,.12)}
+.side-btn svg{width:18px;height:18px;flex:none}
+.brand{display:flex;align-items:center;gap:9px;padding:6px 10px 12px;font-weight:650;font-size:16px}
+.brand svg{width:22px;height:24px;color:var(--acc)}
+.hist-h{font-size:12px;color:var(--ink-3);padding:14px 10px 4px}
+.hist{flex:1;overflow:auto;display:flex;flex-direction:column;gap:1px}
+.hist button{border:0;background:none;text-align:left;padding:8px 10px;border-radius:8px;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hist button:hover{background:rgba(127,127,127,.12)}
+.hist button[aria-current=true]{background:rgba(127,127,127,.18)}
+.side-foot{border-top:1px solid var(--line);padding-top:6px}
+.main{flex:1;min-width:0;display:flex;flex-direction:column;position:relative}
+.top{display:flex;align-items:center;gap:8px;padding:10px 14px;height:56px}
+.icon{width:38px;height:38px;border:0;background:none;border-radius:9px;display:grid;place-items:center;color:var(--ink-2)}
+.icon:hover{background:rgba(127,127,127,.12);color:var(--ink)}
+.icon svg{width:20px;height:20px}
+.model{font-weight:600;font-size:16px;padding:6px 10px;border-radius:9px;border:0;background:none;display:flex;align-items:center;gap:6px}
+.model:hover{background:rgba(127,127,127,.12)}
+.model small{color:var(--ink-3);font-weight:400;font-size:14px}
+.pill{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--acc);background:var(--acc-soft);padding:4px 10px;border-radius:999px}
+.pill i{width:7px;height:7px;border-radius:50%;background:var(--acc)}
+.scroll{flex:1;overflow-y:auto}
+.thread{max-width:780px;margin:0 auto;padding:10px 20px 30px}
+.msg{margin:22px 0}
+.msg.user{display:flex;flex-direction:column;align-items:flex-end}
+.msg.user .body{background:var(--bubble);padding:10px 16px;border-radius:20px;max-width:80%;white-space:pre-wrap;overflow-wrap:anywhere;text-wrap:pretty}
+.msg.ai .body{overflow-wrap:anywhere}
+.md p{margin:0 0 12px}.md p:last-child{margin-bottom:0}
+.md ul,.md ol{margin:0 0 12px;padding-left:24px}
+.md h1,.md h2,.md h3{font-size:17px;margin:16px 0 8px}
+.md code{font:13px var(--mono);background:var(--bubble);padding:1px 5px;border-radius:5px}
+.md pre{background:var(--bubble);padding:12px 14px;border-radius:10px;overflow:auto;margin:0 0 12px}
+.md pre code{background:none;padding:0}
+.msg.ai .body:empty::after{content:"";display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--ink);animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.25}}
+.tools{display:flex;gap:4px;margin-top:6px;align-items:center}
+.msg.ai .tools{margin-left:-8px}
+.msg.user .tools{margin-right:-8px}
+.tbtn{border:0;background:none;color:var(--ink-3);font-size:12.5px;padding:4px 8px;border-radius:7px;display:inline-flex;align-items:center;gap:6px}
+.tbtn:hover{background:rgba(127,127,127,.12);color:var(--ink)}
+.tbtn svg{width:15px;height:15px}
+.masked{margin-top:8px;border:1px dashed var(--line);border-radius:12px;padding:10px 14px;font-size:13.5px;max-width:80%;background:var(--bg)}
+.msg.ai .masked{max-width:100%}
+.masked b{display:block;font-size:12px;color:var(--ink-3);font-weight:600;margin-bottom:4px}
+.masked .mt{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink-2)}
+.tk{background:var(--tok);color:var(--tok-ink);border-radius:5px;padding:0 4px;font:12px/1.7 var(--mono)}
+.err{color:var(--bad);font-size:14px}
+.hero{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;text-align:center}
+.hero h1{font-size:28px;font-weight:600;margin:0 0 6px;letter-spacing:-.01em}
+.hero p{color:var(--ink-2);margin:0;max-width:52ch}
+.hero a{color:var(--acc)}
+.composer{padding:0 20px 18px}
+.box{max-width:740px;margin:0 auto;border:1px solid var(--line);border-radius:26px;background:var(--bg);box-shadow:0 2px 12px rgba(0,0,0,.06);display:flex;align-items:flex-end;padding:8px 8px 8px 18px;gap:8px}
+.box textarea{flex:1;border:0;background:none;resize:none;outline:none;max-height:220px;padding:8px 0;line-height:1.5}
+.send{width:38px;height:38px;border-radius:50%;border:0;background:var(--ink);color:var(--bg);display:grid;place-items:center;flex:none}
+.send:disabled{opacity:.3;cursor:default}
+.send svg{width:18px;height:18px}
+.fine{max-width:600px;margin:8px auto 0;text-align:center;font-size:12px;color:var(--ink-2);line-height:1.45}
+dialog{border:0;border-radius:16px;padding:0;width:min(520px,calc(100vw - 32px));background:var(--bg);color:var(--ink);box-shadow:0 20px 60px rgba(0,0,0,.25)}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+.dlg{padding:22px 24px}
+.dlg h2{margin:0 0 4px;font-size:19px}
+.dlg p.sub{margin:0 0 16px;color:var(--ink-2);font-size:14px}
+.fld{display:flex;flex-direction:column;gap:5px;margin-bottom:14px}
+.fld label{font-size:13px;font-weight:600}
+.fld small{color:var(--ink-3);font-size:12.5px}
+.fld input,.fld select,.fld textarea{border:1px solid var(--line);border-radius:10px;background:var(--bg);padding:9px 12px}
+.fld textarea{min-height:110px;resize:vertical}
+.dlg-f{display:flex;gap:10px;justify-content:flex-end;align-items:center;margin-top:6px}
+.btn{border:1px solid var(--line);background:var(--bg);border-radius:10px;padding:8px 16px;font-weight:550}
+.btn.pri{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.dmsg{margin-right:auto;font-size:13px;color:var(--bad)}
+@media (max-width:760px){
+  aside{position:fixed;inset:0 auto 0 0;z-index:5;box-shadow:0 0 40px rgba(0,0,0,.3)}
+  .pill span{display:none}
+  .msg.user .body,.masked{max-width:92%}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<aside id="side" aria-label="Conversations">
+  <div class="brand"><svg viewBox="0 0 36 40" fill="none" aria-hidden="true"><path d="M18 2 33 8v12c0 8-8.5 15-15 18C11.5 35 3 28 3 20V8L18 2Z" stroke="currentColor" stroke-width="2.6"/><path d="M10.5 26V14l7.5 7.5 7.5-7.5v12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>MaskCode</div>
+  <button class="side-btn" id="new" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>New chat</button>
+  <div class="hist-h">Chats</div>
+  <nav class="hist" id="hist"></nav>
+  <div class="side-foot">
+    <button class="side-btn" id="open-words" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9-9-9z"/><circle cx="8" cy="8" r="1.5"/></svg>Words to always hide</button>
+    <button class="side-btn" id="open-settings" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>Settings</button>
+  </div>
+</aside>
+
+<div class="main">
+  <div class="top">
+    <button class="icon" id="toggle-side" type="button" aria-label="Show or hide chats"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg></button>
+    <button class="model" id="model-btn" type="button">MaskCode <small id="model-name"></small></button>
+    <div class="pill" title="Names, emails, numbers and keys are hidden on this computer before anything is sent"><i aria-hidden="true"></i><span>Private details hidden</span></div>
+    <button class="icon" id="theme" type="button" aria-label="Switch light or dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg></button>
+  </div>
+  <div class="scroll" id="scroll"><div class="thread" id="thread"></div></div>
+  <div class="composer">
+    <form class="box" id="form">
+      <label for="input" style="position:absolute;left:-9999px">Message</label>
+      <textarea id="input" rows="1" placeholder="Message MaskCode"></textarea>
+      <button class="send" id="send" type="submit" aria-label="Send" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+    </form>
+    <div class="fine">Personal details are replaced on your computer before your message is sent. Click “View masked version” to see exactly what the AI received.</div>
+  </div>
+</div>
+
+<dialog id="settings">
+  <form class="dlg" id="settings-form" method="dialog">
+    <h2>Settings</h2>
+    <p class="sub">Connect the AI you want to chat with. Your key is stored only on this computer.</p>
+    <div class="fld"><label for="s-provider">AI provider</label><select id="s-provider"></select></div>
+    <div class="fld" id="f-url"><label for="s-url">Address</label><input id="s-url" autocomplete="off" spellcheck="false" placeholder="https://…/v1"><small>For OpenAI-compatible services the address usually ends in /v1.</small></div>
+    <div class="fld"><label for="s-model">Model</label><input id="s-model" autocomplete="off" spellcheck="false"></div>
+    <div class="fld"><label for="s-key">API key</label><input id="s-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your API key"><small id="key-note"></small></div>
+    <div class="dlg-f"><span class="dmsg" id="s-msg" role="status"></span><button class="btn" type="button" id="s-cancel">Cancel</button><button class="btn pri" type="submit">Save</button></div>
+  </form>
+</dialog>
+
+<dialog id="words">
+  <form class="dlg" id="words-form" method="dialog">
+    <h2>Words to always hide</h2>
+    <p class="sub">Emails, phone numbers, bank details and keys are hidden automatically. Add names MaskCode can’t know, such as clients, colleagues and projects. One per line.</p>
+    <div class="fld"><label for="w-list">Words and names</label><textarea id="w-list" spellcheck="false" placeholder="Cedar Holdings&#10;Nadia Rahman&#10;Project Falcon"></textarea></div>
+    <div class="dlg-f"><span class="dmsg" id="w-msg" role="status"></span><button class="btn" type="button" id="w-cancel">Cancel</button><button class="btn pri" type="submit">Save</button></div>
+  </form>
+</dialog>
+
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  let token = location.hash.slice(1);
+  try { token = decodeURIComponent(token); } catch (_) {}
+  if (token) { try { sessionStorage.setItem('mc-token', token); } catch (_) {} history.replaceState(null, '', location.pathname); }
+  else { try { token = sessionStorage.getItem('mc-token') || ''; } catch (_) {} }
+
+  const root = document.documentElement;
+  let theme = null; try { theme = localStorage.getItem('mc-theme'); } catch (_) {}
+  root.dataset.theme = theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  $('theme').onclick = () => { root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark'; try { localStorage.setItem('mc-theme', root.dataset.theme); } catch (_) {} };
+  if (innerWidth < 760) document.body.classList.add('noside');
+  $('toggle-side').onclick = () => document.body.classList.toggle('noside');
+
+  const esc = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const TOKEN_RE = /PG_[A-Z][A-Z0-9_]{0,23}_[0-9a-f]{8}_[0-9]{4,}/g;
+  const marked = s => esc(s).replace(TOKEN_RE, m => '<span class="tk">' + m + '</span>');
+  // Small, safe markdown: input is escaped first, then a few patterns are formatted.
+  function md(src) {
+    const blocks = src.split(/```/);
+    return blocks.map((b, i) => {
+      if (i % 2) return '<pre><code>' + esc(b.replace(/^[\w-]*\n/, '')) + '</code></pre>';
+      const inl = t => esc(t).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+      return b.split(/\n{2,}/).map(p => {
+        const lines = p.split('\n').filter(l => l.trim());
+        if (!lines.length) return '';
+        if (lines.every(l => /^\s*[-*•]\s+/.test(l))) return '<ul>' + lines.map(l => '<li>' + inl(l.replace(/^\s*[-*•]\s+/, '')) + '</li>').join('') + '</ul>';
+        if (lines.every(l => /^\s*\d+[.)]\s+/.test(l))) return '<ol>' + lines.map(l => '<li>' + inl(l.replace(/^\s*\d+[.)]\s+/, '')) + '</li>').join('') + '</ol>';
+        const h = lines[0].match(/^(#{1,3})\s+(.*)$/);
+        if (h && lines.length === 1) return '<h3>' + inl(h[2]) + '</h3>';
+        return '<p>' + lines.map(inl).join('<br>') + '</p>';
+      }).join('');
+    }).join('');
+  }
+  const headers = () => ({ 'X-MaskCode-Token': token, 'Content-Type': 'application/json' });
+  async function api(path, body) {
+    const r = await fetch(path, { method: body === undefined ? 'GET' : 'POST', headers: headers(), body: body === undefined ? undefined : JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401) throw new Error('This window has expired. Run maskcode app again.');
+    if (!r.ok) throw new Error(j.error || 'Something went wrong.');
+    return j;
+  }
+
+  const chats = []; let current = null; let busy = false; let settings = null;
+  const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+  function newChat() { current = { id: uid(), title: 'New chat', msgs: [] }; chats.unshift(current); render(); $('input').focus(); }
+  function renderHist() {
+    $('hist').innerHTML = chats.filter(c => c.msgs.length).map(c => '<button type="button" data-id="' + c.id + '" aria-current="' + (c === current) + '">' + esc(c.title) + '</button>').join('');
+  }
+  $('hist').onclick = e => { const b = e.target.closest('button[data-id]'); if (!b || busy) return; current = chats.find(c => c.id === b.dataset.id); render(); if (innerWidth < 760) document.body.classList.add('noside'); };
+  $('new').onclick = () => { if (busy) return; if (current && !current.msgs.length) { $('input').focus(); return; } newChat(); };
+
+  const EYE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+  const COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+  function msgHTML(m, i) {
+    const label = m.role === 'user' ? 'What the AI received' : 'What the AI actually wrote';
+    let h = '<div class="msg ' + (m.role === 'user' ? 'user' : 'ai') + '" data-i="' + i + '"><div class="body' + (m.role === 'ai' ? ' md' : '') + '">' + (m.role === 'ai' ? md(m.text) : esc(m.text)) + '</div>';
+    if (m.error) h += '<div class="err">' + esc(m.error) + '</div>';
+    if (m.masked != null) {
+      const n = (m.masked.match(TOKEN_RE) || []).length;
+      h += '<div class="tools"><button type="button" class="tbtn" data-act="mask" aria-expanded="' + !!m.open + '">' + EYE +
+        '<span>' + (m.open ? 'Hide masked version' : 'View masked version') + (n ? ' · ' + n + ' hidden' : '') + '</span></button>' +
+        (m.role === 'ai' ? '<button type="button" class="tbtn" data-act="copy">' + COPY + '<span>Copy</span></button>' : '') + '</div>';
+      if (m.open) h += '<div class="masked"><b>' + label + '</b><div class="mt">' + marked(m.masked) + '</div></div>';
+    }
+    return h + '</div>';
+  }
+  function render() {
+    const t = $('thread');
+    if (!current.msgs.length) {
+      const ready = settings && settings.ready;
+      t.style.height = '100%';
+      t.innerHTML = '<div class="hero"><h1>What can I help with?</h1><p>' + (ready
+        ? 'Chat normally. Names, emails, phone numbers, bank details and keys are swapped for placeholders on your computer before the AI sees them.'
+        : 'Connect your AI provider in <a href="#" id="go-settings">Settings</a> to start. Private details are hidden before anything is sent.') + '</p></div>';
+      const g = $('go-settings'); if (g) g.onclick = e => { e.preventDefault(); openSettings(); };
+    } else { t.style.height = ''; t.innerHTML = current.msgs.map(msgHTML).join(''); }
+    renderHist();
+  }
+  $('thread').onclick = e => {
+    const b = e.target.closest('button[data-act]'); if (!b) return;
+    const m = current.msgs[+b.closest('.msg').dataset.i];
+    if (b.dataset.act === 'mask') { m.open = !m.open; const at = $('scroll').scrollTop; render(); $('scroll').scrollTop = at; }
+    else navigator.clipboard.writeText(m.text).then(() => { const s = b.querySelector('span'); s.textContent = 'Copied'; setTimeout(() => s.textContent = 'Copy', 1200); });
+  };
+  const atBottom = () => { const s = $('scroll'); return s.scrollHeight - s.scrollTop - s.clientHeight < 80; };
+  const toBottom = () => { $('scroll').scrollTop = $('scroll').scrollHeight; };
+
+  const input = $('input');
+  function grow() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 220) + 'px'; $('send').disabled = busy || !input.value.trim(); }
+  input.addEventListener('input', grow);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('form').requestSubmit(); } });
+  $('form').onsubmit = async e => {
+    e.preventDefault();
+    const text = input.value.trim(); if (!text || busy) return;
+    if (!settings || !settings.ready) { openSettings(); return; }
+    busy = true; input.value = ''; grow();
+    const chat = current;
+    if (!chat.msgs.length) chat.title = text.replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').slice(0, 40);
+    const um = { role: 'user', text, masked: null }, am = { role: 'ai', text: '', masked: null };
+    chat.msgs.push(um, am); render(); toBottom();
+    try {
+      const r = await fetch('/api/chat', { method: 'POST', headers: headers(), body: JSON.stringify({ chat: chat.id, text }) });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'Something went wrong.'); }
+      const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read(); if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl); buf = buf.slice(nl + 1); if (!line) continue;
+          const ev = JSON.parse(line); const stick = atBottom();
+          if (ev.type === 'masked') um.masked = ev.masked;
+          else if (ev.type === 'delta') am.text += ev.text;
+          else if (ev.type === 'done') am.masked = ev.masked_reply;
+          else if (ev.type === 'error') am.error = ev.error;
+          if (chat === current) { render(); if (stick) toBottom(); }
+        }
+      }
+      if (!am.text && !am.error) am.error = 'No reply was received.';
+    } catch (err) { am.error = err.message; }
+    busy = false; if (chat === current) render(); grow(); input.focus();
+  };
+
+  async function loadSettings() {
+    settings = await api('/api/settings');
+    $('model-name').textContent = settings.ready ? settings.model : 'not connected';
+  }
+  function fillProvider(p, keep) {
+    const pre = settings.presets[p];
+    $('f-url').style.display = p === 'custom' ? '' : 'none';
+    if (!keep) { $('s-url').value = pre.base_url; $('s-model').value = pre.model; }
+    $('key-note').textContent = settings.has_key && p === settings.provider ? 'A key is saved. Leave this blank to keep it.' : '';
+  }
+  function openSettings() {
+    const sel = $('s-provider');
+    sel.innerHTML = Object.entries(settings.presets).map(([k, v]) => '<option value="' + k + '">' + esc(v.label) + '</option>').join('');
+    sel.value = settings.provider; $('s-url').value = settings.base_url; $('s-model').value = settings.model; $('s-key').value = '';
+    fillProvider(settings.provider, true); $('s-msg').textContent = '';
+    $('settings').showModal(); (settings.has_key ? $('s-model') : $('s-key')).focus();
+  }
+  $('s-provider').onchange = () => fillProvider($('s-provider').value, false);
+  $('open-settings').onclick = openSettings; $('model-btn').onclick = openSettings;
+  $('s-cancel').onclick = () => $('settings').close();
+  $('settings-form').onsubmit = async e => {
+    e.preventDefault();
+    try {
+      settings = await api('/api/settings', { provider: $('s-provider').value, base_url: $('s-url').value, model: $('s-model').value, api_key: $('s-key').value });
+      $('model-name').textContent = settings.ready ? settings.model : 'not connected';
+      if (!settings.ready) { $('s-msg').textContent = 'Add an API key to start chatting.'; return; }
+      $('settings').close(); if (!current.msgs.length) render(); input.focus();
+    } catch (err) { $('s-msg').textContent = err.message; }
+  };
+
+  $('open-words').onclick = async () => {
+    $('w-msg').textContent = '';
+    try { const r = await api('/api/terms'); $('w-list').value = r.terms.map(t => t.value).join('\n'); } catch (err) { $('w-msg').textContent = err.message; }
+    $('words').showModal(); $('w-list').focus();
+  };
+  $('w-cancel').onclick = () => $('words').close();
+  $('words-form').onsubmit = async e => {
+    e.preventDefault();
+    const terms = $('w-list').value.split('\n').map(s => s.trim()).filter(Boolean).map(value => ({ value, label: 'TERM' }));
+    try { await api('/api/terms', { terms }); $('words').close(); chats.length = 0; newChat(); }
+    catch (err) { $('w-msg').textContent = err.message; }
+  };
+
+  if (!token) { document.body.innerHTML = '<div class="hero" style="width:100%"><h1>This window has closed</h1><p>Run <b>maskcode app</b> again to open a fresh window.</p></div>'; return; }
+  newChat();
+  loadSettings().then(render).catch(err => { $('thread').innerHTML = '<div class="hero"><h1>MaskCode is not running</h1><p>' + esc(err.message) + '</p></div>'; });
+})();
+</script>
+</body>
+</html>

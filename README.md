@@ -1,5 +1,55 @@
 # MaskCode
 
+**A private AI chat. Talk to ChatGPT or Claude without handing over your personal details.**
+
+MaskCode looks and works like ChatGPT. Before your message leaves your computer,
+it swaps names, emails, phone numbers, bank details and keys for placeholders.
+The AI answers using the placeholders, and MaskCode puts the real details back
+in before you see the reply. Click **View masked version** on any message to see
+exactly what the AI received.
+
+## Get started
+
+**Windows:** [download the ZIP](https://github.com/HassanEltahirr/maskcode/archive/refs/heads/main.zip),
+unzip it, and double-click **Start MaskCode.bat**.
+
+**Mac:** unzip the same download, right-click **Start MaskCode.command** and choose **Open**.
+
+The first start installs MaskCode (about a minute; needs
+[Python 3.10+](https://www.python.org/downloads/), and the launcher opens that page
+if it's missing). MaskCode then opens in your browser. Open **Settings**, pick
+OpenAI, Anthropic or any OpenAI-compatible service, paste your API key, and start chatting.
+
+From a terminal:
+
+```sh
+pip install git+https://github.com/HassanEltahirr/maskcode.git
+maskcode app
+```
+
+## What gets hidden
+
+Emails, phone numbers, IBANs and card numbers, IP addresses, Emirates IDs, private
+keys, passwords and API tokens are hidden automatically. Add client names,
+colleagues and projects under **Words to always hide**.
+
+## Privacy
+
+- MaskCode runs on your computer at a private address protected by a one-time secret.
+- Only the masked text is sent to your AI provider. The table that maps placeholders
+  back to real values stays in memory and is forgotten when you close MaskCode.
+- Chats are not saved. Your API key and word list are stored in `~/.maskcode/`.
+- Detection is best effort and can miss a name it has never seen. Use
+  **View masked version** to check, and add anything it missed to your word list.
+
+---
+
+## For developers: protected coding agents
+
+MaskCode also wraps Claude Code and Codex CLI so coding agents only ever see
+masked context. This mode currently requires macOS. The rest of this document
+covers it.
+
 MaskCode is an **experimental local privacy wrapper** for the installed Claude
 Code or Codex CLI. A local Ollama model detects sensitive spans, rules replace
 them with stable placeholders, and supported responses and tool arguments are
